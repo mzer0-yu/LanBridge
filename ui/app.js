@@ -182,7 +182,7 @@ function connectorReadiness(current){
   if(!conn.installed)reasons.push('尚未找到 cloudflared，可在账户与配置中自动检测或下载');
   if(!cfg.tunnel_id&&current.cloudflare_setup?.ready)reasons.push('尚未创建 Tunnel');
   else if(cfg.tunnel_id&&!current.credentials.tunnel_token)reasons.push('缺少 Tunnel 连接令牌，请点击“创建 Tunnel / 获取令牌”');
-  if(reasons.length)return {label:'待处理',kind:'warning',detail:reasons.join('；')+'。',attention:true};
+  if(reasons.length)return {label:!conn.installed?'待安装连接器':!cfg.tunnel_id?'待创建 Tunnel':'待获取令牌',kind:'warning',detail:reasons.join('；')+'。',attention:true};
   if(!current.cloudflare_setup?.ready)return {label:'待配置',kind:'neutral',detail:'请先完成账户与配置，再创建 Tunnel。',attention:true};
   if(conn.running)return {label:'运行中',kind:'success',detail:'本机连接器运行中；公网连接状态请通过 API 核查。',attention:false};
   return {label:'未启动',kind:'neutral',detail:'配置已准备好。发布所需路由后，点击“启动连接器”；启动后通过 API 核查公网连接。',attention:true};
@@ -237,14 +237,15 @@ function renderNavigationIssues(){
     const button=$('[data-view='+view+']'),badge=$('#'+view+'-nav-status');
     if(view==='connector'){
       const readiness=connectorReadiness(state);
-      badge.hidden=false;badge.textContent=reasons.length?'待处理':readiness.label;
+      badge.hidden=false;badge.textContent=readiness.kind==='warning'?readiness.label:reasons.length?'待处理':readiness.label;
       badge.className='nav-status '+(reasons.length?'warning':readiness.kind);
       button.title=reasons.length?[...new Set(reasons)].join('；'):readiness.detail;
     }else{
       const recheck=view==='settings'&&!reasons.length&&(state.cloudflare_permission_issues||[]).some(issue=>issue.status==='needs_recheck');
-      badge.textContent=recheck?'待核验':'待处理';badge.className='nav-status '+(recheck?'neutral':'warning');
+      const permissions=view==='settings'&&state.cloudflare_setup?.ready&&!state.token_management?.error&&!state.token_management?.pending&&(state.cloudflare_permission_issues||[]).length>0;
+      badge.textContent=permissions?'权限待核验':recheck?'待核验':'待处理';badge.className='nav-status '+(recheck?'neutral':'warning');
       badge.hidden=view==='overview'||(!reasons.length&&!recheck);
-      button.title=reasons.length&&view!=='overview'?[...new Set(reasons)].join('；'):'';
+      button.title=reasons.length&&view!=='overview'?[...new Set(reasons)].join('；'):recheck?'凭据已更新，请重试原操作核验权限':'';
     }
   }
   const reasons=[...new Set(issues[currentView]||[])].filter(reason=>currentView!=='connector'||reason!==connectorReadiness(state).detail);
