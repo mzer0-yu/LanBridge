@@ -1,1 +1,137 @@
-# LanBridge
+# LanBridge · 局域网网页公网管理平台
+
+LanBridge 是运行在 Windows 的 Cloudflare 管理平台，用于将局域网网页发布到公网，并统一管理域名映射、人类验证、访问策略和连接器。支持网页管理、API 与 CLI 操作，以及配置预览、写后核验、凭据加密和操作审计。
+
+## 打开平台
+
+当前电脑已安装项目独立虚拟环境和 cloudflared。运行 `start.ps1`，打开 **http://127.0.0.1:8890**，首次在页面设置管理员用户名和至少 12 位密码。
+
+```powershell
+Set-Location <本项目目录>
+.\start.ps1
+```
+
+管理台仅监听 `127.0.0.1:8890`，公网访问网关仅监听 `127.0.0.1:8891`，由 cloudflared 在本机连接。关闭平台会停止它自己启动的连接器。未配置系统服务或登录自启。Windows DPAPI 使用当前用户身份；请在当前用户终端运行，受限沙箱身份无法解密该用户的保险库。
+
+新电脑需要 Python 3.12+，先运行 `install.ps1 -PythonPath <python.exe 完整路径>`。项目附带 `bin/cloudflared.exe`，版本 2026.9.3；可以在配置页指定其他受信任的官方 cloudflared。
+
+## 接入第一个网站
+
+1. 在“账户与配置”填写 Account ID、Zone ID、Zone 名称，例如 `example.com`。Zone 必须在该 Cloudflare 账户中，且状态为 Active。网站使用所配置域名下的子域名；已有冲突 DNS 时，平台拒绝覆盖。
+2. 在本机凭据表单填写受指定账户和 Zone 限制的 API Token。不要把令牌发到聊天、写入源代码或放在命令参数中。
+3. 添加网站，例如 `app.example.com` → `http://192.168.1.20:3000`。这台 Windows 电脑必须能访问该源站，源站 URL 不带路径。默认开启人类验证；可组合访问口令、国家/IP 白名单和限流。口令至少 12 位。
+
+添加网站前必须已保存 Account ID、Zone ID、Zone 名称和写入 API Token；缺少任一项时，点击“添加网站”会提示缺少的字段并引导到“账户与配置”，不会打开新增表单。API/CLI 同样拒绝创建。此检查表示必填配置已保存，实际令牌权限及 Zone Active 状态在云端操作时核验。Tunnel 和 Turnstile 可在登记网站后创建，不作为新增网站的前置条件。已有网站仍允许编辑和停用。
+4. 如启用人类验证，在“访问策略”点击“创建 / 同步 Widget 域名”，通过 Cloudflare API 创建 Managed Turnstile Widget 并加密保存 Secret。手工配置的 Widget 需自行在 Cloudflare 管理允许域名；本平台不接管手工 Widget。新增人类验证域名后再次同步。
+5. 在“连接器”创建Tunnel。平台在自定义名称后加随机标识，记录其 ID，读取连接令牌并加密保存。创建成功但令牌读取失败时，再点击会重试获取令牌。创建请求结果未知时，按唯一名称查找恢复；找不到或结果不唯一时停止，不盲目重复创建。
+6. 点击“预览 Cloudflare 配置”，检查 ingress 和将创建的 DNS；点击“应用此预览并核验”。平台重新读取远端配置及 DNS，对比 revision 后才写入。只管理平台登记的网站路由，保留其他 hostname 路由和配置字段，末尾为 `http_status:404`。
+7. 启动连接器，再点击“通过 API 核查”。使用外部网络打开公网域名，确认验证页面、源站网页、登录和 WebSocket 均正常。API 核查反映 Tunnel 边缘连接，不能替代实际公网端到端验证。
+
+## API 令牌权限
+
+| 凭据 | 权限与范围 |
+| --- | --- |
+| 只读 API Token（可选） | 指定账户 Cloudflare Tunnel Read；指定 Zone 的 Zone Read、DNS Read |
+| 写入 API Token | 指定账户 Cloudflare Tunnel Edit / Cloudflare One Connector: cloudflared Write；指定 Zone 的 DNS Edit、Zone Read；如自动管理 Widget，再加指定账户 Turnstile Edit |
+| Tunnel 连接令牌 | 平台创建 Tunnel 后通过管理 API 获取，独立用于 cloudflared，不能替代管理 API Token |
+| Turnstile Site Key / Secret | Site Key 为公开配置；Secret 只用于后端 Siteverify 校验 |
+
+没有单独只读 Token 时，读取使用写入 Token，其也需拥有读取相关资源的权限。获取 Tunnel 连接令牌、读取 Widget 配置始终使用写入 Token；启用人类验证时预览也会核对 Widget 允许域名，因此写入 Token 需要 Turnstile Edit。Cloudflare 控制台的权限显示名称可能变化，请按下列官方接口的权限表选择对应权限。
+
+## 访问网关与保护
+
+```text
+访客 HTTPS → Cloudflare → Tunnel → 127.0.0.1:8891
+                                       ↓ 国家/IP/限流
+                                       ↓ Turnstile + 可选口令
+                                       ↓ 登记的局域网网页
+管理员 → 127.0.0.1:8890 → 共用业务核心 → Cloudflare API
+CLI run.py ────────────────────────┘
+```
+
+- 网页无需嵌入 Turnstile。网关显示独立验证页，后端调用 Siteverify，检查 success、hostname 和 action；失败、缺少密钥或服务不可用时拒绝放行。
+- 通过验证后设置 Secure、HttpOnly、host-only Cookie，绑定网站 ID、域名、IP、策略版本及过期时间；验证 Token 本身由 Cloudflare 一次性校验。
+- API 写入或没有网页 Accept 头的未验证请求返回 401；WebSocket 在握手前执行相同访问控制。修改策略或停用网站会拒绝新请求，并在约 2 秒内关闭既有 WebSocket。已经开始的普通 HTTP 响应不强制中断。
+- 网关不提供管理 API；其 `/.lanbridge/` 路径只用于验证。平台管理 Cookie 和验证 Cookie 不会转发到源站；源站 Cookie 的 Domain 移除，使其作用于当前公网域名。
+- 国家和客户端 IP 只信任 loopback 连接器提供的 Cloudflare 请求头。两端监听本机，Uvicorn 禁用通用转发头信任。持有本机用户权限的进程属于信任边界。
+- 国家/IP 白名单、每来源请求限流在本地网关执行，不是 Cloudflare WAF 规则。请求计数保存在内存，最多 10000 个计数桶，重启清空；不会自动变成永久封禁。
+- 管理员密码使用 scrypt；管理员会话保存在 SQLite，8 小时过期，支持注销和密码修改后全部失效。管理 API 同时检查 Host、Origin 与 CSRF。
+- 凭据在数据库中使用 Fernet 加密，主密钥由 Windows DPAPI 绑定当前用户，数据目录收紧 ACL。Unix 使用受限本机密钥文件，Windows 为本项目主要运行目标。
+
+## API 和 CLI
+
+网页/API/CLI 使用同一份 `lanbridge/service.py` 业务核心。管理 API 路径：
+
+| 方法 / 路径 | 操作 |
+| --- | --- |
+| GET `/api/bootstrap` | 初始化和登录状态 |
+| POST `/api/setup`, `/api/login`, `/api/logout`, `/api/password` | 管理员账户与会话 |
+| GET `/api/state` | 配置、网站、凭据存在状态、连接器、上次边缘核验、审计 |
+| POST `/api/settings`, `/api/credentials` | 设置与加密保存凭据 |
+| POST `/api/sites` | 新建/编辑网站；包含 id 时编辑，停用用 enabled=false |
+| POST `/api/sites/{id}/probe` | 局域网源站探测 |
+| POST `/api/cloudflare/create-tunnel` | 创建Tunnel / 重试读取连接令牌 |
+| POST `/api/cloudflare/turnstile` | 创建/更新平台拥有的 Widget 域名 |
+| POST `/api/cloudflare/preview` | 读取并预览配置，返回 revision |
+| POST `/api/cloudflare/apply` | 提交 `{ "revision": "预览返回值" }`，写后核验 |
+| POST `/api/cloudflare/check` | 查询实际 Tunnel 边缘状态 |
+| POST `/api/connector/start`, `/api/connector/stop` | 管理本平台的连接器进程 |
+
+除初始化与登录外，管理 API 需要 Cookie 会话。所有 POST 需要 `Origin: http://127.0.0.1:8890`，已登录的 POST 还需要 `/api/login` 返回的 `X-CSRF-Token`。POST 发送 JSON，无字段的操作发送 `{}`。未提供任意 Cloudflare API 透传接口。
+
+```powershell
+.\.venv\Scripts\python.exe run.py capabilities
+.\.venv\Scripts\python.exe run.py status
+.\.venv\Scripts\python.exe run.py configure config.example.json
+.\.venv\Scripts\python.exe run.py configure-secret cf_write_token
+.\.venv\Scripts\python.exe run.py create-tunnel
+.\.venv\Scripts\python.exe run.py save-site my-site.json
+.\.venv\Scripts\python.exe run.py turnstile
+.\.venv\Scripts\python.exe run.py preview
+.\.venv\Scripts\python.exe run.py apply --revision <预览版本>
+.\.venv\Scripts\python.exe run.py serve
+```
+
+配置示例需先填入自己的账户、Zone 和域名。所有密钥通过隐藏输入。CLI 输出 `lanbridge-result/v1` JSON，失败退出码 1。运行中的平台持有独占锁，此时从管理台/API 修改；CLI `status` 可只读，其他 CLI 操作需先停止平台。使用另一个 `--data-dir` 可以独立配置另一个账户和端口。
+
+网站 JSON 示例：
+
+```json
+{
+  "name": "内网工作台",
+  "hostname": "app.example.com",
+  "origin": "http://192.168.1.20:3000",
+  "human_check": true,
+  "passcode_required": false,
+  "enabled": true,
+  "allowed_countries": ["CN", "HK"],
+  "allowed_ips": [],
+  "requests_per_minute": 180,
+  "session_minutes": 60
+}
+```
+
+## 变更、失败和运行限制
+
+- Cloudflare 多步骤写入不是原子事务；检查与 PUT 之间仍存在外部并发修改窗口。避免同一 Tunnel 的多人同时维护。API 超时可能已有部分写入，平台记录 `publish_incomplete`，不会盲目删除资源或宣称成功；重新预览可核对并继续。DNS 已创建但 ingress 未发布的情况也按此流程处理。
+- 修改本机策略立即影响网关；新增、启用或停用路由仍需预览并应用。停用后本机立即拒绝请求，应用后移除该 hostname ingress；保留 DNS 注册，不自动删除云端资源。
+- 固定域名更新不需要重启 cloudflared。连接器异常退出会显示退出码，当前版本需手动再次启动；不安装系统看护、自启动或远程 Agent。
+- 支持 HTTP/HTTPS 全路径、查询参数、二进制响应、常见 Cookie/源站绝对重定向，以及 WebSocket 文本与二进制。请求体上限 32 MiB，HTTP 读取超时 120 秒，WebSocket 消息上限 8 MiB。
+- 源站必须解析到 RFC1918、本机或 ULA IPv6 地址，连接前再解析并固定 IP，拒绝公网/链路本地/元数据地址和本平台端口。HTTPS 保持证书校验，源站自签名证书需要在系统中受信任。
+- “任意局域网网页”并不保证第三方网页无需调整即可完全兼容：写死局域网 URL、跨域 API、OAuth callback、CSP、Cookie 或 Host 校验的应用，需要把其公开 URL 配置为公网域名；平台不重写 HTML/JavaScript。非 HTTP 服务不在当前范围。
+- 无真正公网账户实测时，不声称公网发布已完成。配置 Cloudflare 后，应使用外部网络验证真实 Turnstile、应用登录、接口写入和 WebSocket。
+
+## 测试与文件
+
+运行 `.\.venv\Scripts\python.exe -m pytest -q`。测试覆盖真实 Windows DPAPI、鉴权与 CSRF、Turnstile 校验、Cookie 隔离、策略绑定、限流、局域网源站约束、Cloudflare 配置漂移及冲突、部分失败审计、实际本机 HTTP/WebSocket 转发。Cloudflare/Turnstile 云端 API 在自动测试中使用受控替身，未使用用户的云端凭据。
+
+源码：`lanbridge/`；界面：`ui/`；CLI：`run.py`；本机数据：`data/`；测试：`tests/`。`data/` 和 `.venv/` 被 Git 忽略。DPAPI 保险库不能仅复制到另一个 Windows 用户下使用；迁移账户时重新配置凭据。
+
+## 官方接口依据
+
+- [Cloudflare API 创建远程 Tunnel、配置 ingress 和 DNS](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel-api/)
+- [Tunnel 连接令牌](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/)
+- [cloudflared 运行参数](https://developers.cloudflare.com/tunnel/reference/run-parameters/)
+- [Turnstile Widget API](https://developers.cloudflare.com/turnstile/get-started/widget-management/api/)
+- [Turnstile 服务端验证](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
+- [cloudflared 源码及许可证](https://github.com/cloudflare/cloudflared)

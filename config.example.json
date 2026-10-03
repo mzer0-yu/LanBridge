@@ -1,0 +1,10 @@
+{
+  "account_id": "",
+  "zone_id": "",
+  "zone_name": "example.com",
+  "tunnel_name": "lanbridge-windows",
+  "cloudflared_path": "",
+  "turnstile_sitekey": "",
+  "admin_port": 8890,
+  "gateway_port": 8891
+}
