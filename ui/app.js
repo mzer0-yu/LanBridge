@@ -172,12 +172,12 @@ $('#token-manager-form').oninput=e=>{e.currentTarget.dataset.dirty='true';};
 
 function connectorReadiness(current){
   const cfg=current.settings,conn=current.connector,reasons=[];
-  if(!current.cloudflare_setup?.ready)reasons.push('账户配置缺少：'+(current.cloudflare_setup?.missing||[]).join('、'));
+
   if(!conn.installed)reasons.push('尚未找到 cloudflared，可在账户与配置中自动检测或下载');
-  if(!cfg.tunnel_id)reasons.push('尚未创建 Tunnel');
-  else if(!current.credentials.tunnel_token)reasons.push('缺少 Tunnel 连接令牌，请点击“创建 Tunnel / 获取令牌”');
-  if(current.cloudflare_permission_issues?.length)reasons.push('Cloudflare 权限未通过，请先处理页面上方的权限提示，再重试失败操作');
+  if(!cfg.tunnel_id&&current.cloudflare_setup?.ready)reasons.push('尚未创建 Tunnel');
+  else if(cfg.tunnel_id&&!current.credentials.tunnel_token)reasons.push('缺少 Tunnel 连接令牌，请点击“创建 Tunnel / 获取令牌”');
   if(reasons.length)return {label:'待处理',kind:'warning',detail:reasons.join('；')+'。',attention:true};
+  if(!current.cloudflare_setup?.ready)return {label:'待配置',kind:'neutral',detail:'请先完成账户与配置，再创建 Tunnel。',attention:true};
   if(conn.running)return {label:'运行中',kind:'success',detail:'本机连接器运行中；公网连接状态请通过 API 核查。',attention:false};
   return {label:'未启动',kind:'neutral',detail:'配置已准备好。发布所需路由后，点击“启动连接器”；启动后通过 API 核查公网连接。',attention:true};
 }
@@ -186,9 +186,9 @@ function renderConnectorReadiness(){
   badge.textContent=readiness.label;badge.className='nav-status '+readiness.kind;
   $('[data-view=connector]').title=readiness.detail;
   $('#connector-readiness').hidden=!readiness.attention;
-  $('#connector-readiness strong').textContent=readiness.kind==='warning'?'连接器需要处理':'连接器尚未启动';
+  $('#connector-readiness strong').textContent=readiness.kind==='warning'?'连接器需要处理':!state.cloudflare_setup?.ready?'先完成账户配置':'连接器尚未启动';
   $('#connector-readiness-detail').textContent=readiness.detail;
-  $('#connector-readiness [data-goto=settings]').hidden=readiness.kind!=='warning';
+  $('#connector-readiness [data-goto=settings]').hidden=readiness.kind!=='warning'&&!!state.cloudflare_setup?.ready;
 }
 
 function navigationIssues(current){
@@ -197,36 +197,31 @@ function navigationIssues(current){
   const missing=current.cloudflare_setup?.missing||[];
   if(!current.cloudflare_setup?.ready){
     issues.settings.push('账户配置未完成：'+missing.join('、'));
-    issues.sites.push('添加网站前需完成账户配置：'+missing.join('、'));
   }
   for(const issue of current.cloudflare_permission_issues||[]){
     issues.settings.push(issue.detail);
-    if(issue.detail.includes('Turnstile'))issues.security.push(issue.detail);
   }
   if(current.token_management?.error)issues.settings.push(current.token_management.error.detail);
   if(current.token_management?.pending)issues.settings.push('业务令牌创建结果未知，请在 Cloudflare 核对后接入，勿重复创建');
   const readiness=connectorReadiness(current);
   if(readiness.kind==='warning')issues.connector.push(readiness.detail);
-  if(enabled.length&&!current.connector.running)issues.connector.push('有启用的网站，但连接器尚未运行，公网访问需要启动连接器');
   const humanSites=enabled.filter(site=>site.human_check);
   if(humanSites.length&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))issues.security.push('启用人类验证的网站缺少 Turnstile 配置或服务端密钥，请创建 / 同步 Widget');
   for(const site of enabled){
     const probe=current.site_probes?.[site.id];
-    if(probe?.reachable===false)issues.sites.push(site.name+'：上次源站检查不可达，请检查局域网地址并重新检查');
+    if(probe?.reachable===false&&probe.origin===site.origin)issues.sites.push(site.name+'：上次源站检查不可达，请检查局域网地址并重新检查');
   }
   if(Array.isArray(current.published_hosts)){
     const desired=enabled.map(site=>site.hostname).sort(),published=[...current.published_hosts].sort();
     if(JSON.stringify(desired)!==JSON.stringify(published)){
-      issues.sites.push('网站启用状态与已发布的域名不一致，请到连接器预览并发布路由');
       issues.connector.push('网站路由有待发布变更，请预览并应用配置');
     }
   }
   if(current.publication_needs_review){
     issues.connector.push('上次发布未完成或核验失败，请重新预览并核对远端变更');
-    issues.audit.push('有未解决的发布失败记录，请到连接器核对并完成发布');
   }
   const edge=current.cloudflare;
-  if(current.connector.running&&edge&&Date.now()/1000-edge.checked_at<150&&edge.tunnel_id===cfg.tunnel_id&&edge.edge_status!=='healthy')issues.connector.push('最近 API 核查的 Tunnel 状态为 '+edge.edge_status+'，请检查连接并重新核查');
+  if(current.connector.running&&edge&&Date.now()/1000>=edge.checked_at&&Date.now()/1000-edge.checked_at<150&&edge.tunnel_id===cfg.tunnel_id&&edge.edge_status!=='healthy')issues.connector.push('最近 API 核查的 Tunnel 状态为 '+edge.edge_status+'，请检查连接并重新核查');
   issues.overview=[...new Set(['settings','sites','security','connector','audit'].flatMap(view=>issues[view]))];
   return issues;
 }
@@ -235,10 +230,14 @@ function renderNavigationIssues(){
   for(const [view,reasons] of Object.entries(issues)){
     const button=$('[data-view='+view+']'),badge=$('#'+view+'-nav-status');
     if(view==='connector'){
-      if(reasons.length){badge.hidden=false;badge.textContent='待处理';badge.className='nav-status warning';}
-    }else badge.hidden=!reasons.length;
-    if(reasons.length)button.title=[...new Set(reasons)].join('；');
-    else if(view!=='connector')button.title='';
+      const readiness=connectorReadiness(state);
+      badge.hidden=false;badge.textContent=reasons.length?'待处理':readiness.label;
+      badge.className='nav-status '+(reasons.length?'warning':readiness.kind);
+      button.title=reasons.length?[...new Set(reasons)].join('；'):readiness.detail;
+    }else{
+      badge.hidden=view==='overview'||!reasons.length;
+      button.title=reasons.length&&view!=='overview'?[...new Set(reasons)].join('；'):'';
+    }
   }
   const reasons=[...new Set(issues[currentView]||[])];
   $('#view-issues').hidden=!reasons.length;

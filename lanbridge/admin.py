@@ -192,6 +192,7 @@ def create_admin(service):
             result = {"http_status": response.status_code, "reachable": True, "checked_at": time.time()}
         except httpx.HTTPError:
             result = {"reachable": False, "checked_at": time.time()}
+        result["origin"] = site["origin"]
         service.store.set("probe_" + site_id, result)
         return result
 

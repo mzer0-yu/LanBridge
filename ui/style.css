@@ -18,6 +18,6 @@
 
 .permission-alert{border:1px solid #d99337;background:#fff4e4;color:#713e14;display:block}.permission-alert[hidden]{display:none}.permission-alert p{margin:10px 0}.permission-field-error{outline:2px solid #d99337;outline-offset:6px;border-radius:6px}
 
-aside nav{flex:1}aside nav button[data-view=settings]{margin-top:auto}@media(max-width:760px){aside nav{flex:initial}aside nav button[data-view=settings]{margin-top:0}}
+
 
 .nav-status{margin-left:auto;font-size:10px;white-space:nowrap;padding:2px 5px;border-radius:5px;line-height:1.5}.nav-status.warning{background:#fff0d9;color:#97551a}.nav-status.success{background:#e2f2e6;color:#246b53}.nav-status.neutral{background:#edf0ee;color:#78857e}
