@@ -4,7 +4,7 @@ LanBridge 是运行在 Windows 的 Cloudflare 管理平台，用于将局域网�
 
 ## 打开平台
 
-当前电脑已安装项目独立虚拟环境和 cloudflared。运行 `start.ps1`，打开 **http://127.0.0.1:8890**，首次在页面设置管理员用户名和至少 12 位密码。
+当前电脑已安装项目独立虚拟环境和 cloudflared。双击项目目录中的 `start.cmd`，启动后自动打开管理页面 **http://127.0.0.1:8890**。首次在页面设置管理员用户名和至少 12 位密码。也可以在 PowerShell 中运行 `start.ps1`。
 
 ```powershell
 Set-Location <本项目目录>
@@ -12,6 +12,8 @@ Set-Location <本项目目录>
 ```
 
 管理台仅监听 `127.0.0.1:8890`，公网访问网关仅监听 `127.0.0.1:8891`，由 cloudflared 在本机连接。关闭平台会停止它自己启动的连接器。未配置系统服务或登录自启。Windows DPAPI 使用当前用户身份；请在当前用户终端运行，受限沙箱身份无法解密该用户的保险库。
+
+**退出方式**：管理页面左侧选择“退出 LanBridge”，确认后停止管理台、访问网关和本平台启动的连接器；配置、凭据和云端资源保留。再次双击 `start.cmd` 可启动平台，连接器仍需按需要启动。“退出管理员”仅退出登录，服务和公网转发继续运行。终端启动时也可按 `Ctrl+C` 正常停止。关闭浏览器标签页不会停止平台。
 
 新电脑需要 Python 3.12+，先运行 `install.ps1 -PythonPath <python.exe 完整路径>`。管理界面的 cloudflared 路径可留空：点击字段旁的“自动检测 / 下载”，先查系统 PATH，再查项目 `bin/`，找不到则从 Cloudflare 官方 GitHub 发布下载到 `bin/cloudflared.exe`。使用发布 SHA-256 和大小校验后检测版本、保存路径；失败可重试或手动指定路径。Windows 启动连接器时也会自动准备，已有明确路径不会被静默替换。二进制不提交到仓库。
 
@@ -66,6 +68,7 @@ CLI run.py ───────────────────────
 | --- | --- |
 | GET `/api/bootstrap` | 初始化和登录状态 |
 | POST `/api/setup`, `/api/login`, `/api/logout`, `/api/password` | 管理员账户与会话 |
+| POST `/api/shutdown` | 已登录管理员关闭本机平台，需要 Origin 与 CSRF 校验 |
 | GET `/api/state` | 配置、网站、凭据存在状态、连接器、上次边缘核验、审计 |
 | POST `/api/settings`, `/api/credentials` | 设置与加密保存凭据 |
 | POST `/api/sites` | 新建/编辑网站；包含 id 时编辑，停用用 enabled=false |

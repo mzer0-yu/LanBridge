@@ -21,3 +21,5 @@
 
 
 .nav-status{margin-left:auto;font-size:10px;white-space:nowrap;padding:2px 5px;border-radius:5px;line-height:1.5}.nav-status.warning{background:#fff0d9;color:#97551a}.nav-status.success{background:#e2f2e6;color:#246b53}.nav-status.neutral{background:#edf0ee;color:#78857e}
+
+@media(max-width:760px){.sidebar-bottom{display:flex;gap:16px;align-items:center;margin-top:12px;padding-top:10px}.sidebar-bottom .sidebar-purpose{display:none}}

@@ -6,6 +6,7 @@ import time
 import httpx
 from fastapi import FastAPI, Request
 from starlette.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 from .gateway import Limiter
 from .models import Settings
 from .service import pinned_origin
@@ -13,7 +14,7 @@ from .store import password_check, password_hash
 from pydantic import ValidationError
 
 
-def create_admin(service):
+def create_admin(service, shutdown=None):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     limiter = Limiter()
     ui = Path(__file__).resolve().parent.parent / "ui"
@@ -114,6 +115,13 @@ def create_admin(service):
         response = JSONResponse({"logged_out": True})
         response.delete_cookie("lb_admin")
         return response
+
+    @app.post("/api/shutdown")
+    def shutdown_platform():
+        if shutdown is None:
+            raise ValueError("当前运行方式不支持网页退出，请在启动终端按 Ctrl+C")
+        service.store.audit("platform_shutdown_requested", {})
+        return JSONResponse({"stopping": True}, background=BackgroundTask(shutdown))
 
     @app.post("/api/password")
     async def change_password(request: Request):
