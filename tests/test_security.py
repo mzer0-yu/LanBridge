@@ -21,6 +21,30 @@ def test_cloudflare_forbidden_names_operation_without_echoing_upstream_secrets(s
     assert "10000" in text and "Cloudflare Tunnel Write" in text
     assert "sensitive-upstream-value" not in text and "test-only-cloudflare-token" not in text
     assert len(text) < 400
+    issues = service.store.get("cloudflare_permission_issues")
+    assert len(issues) == 1 and next(iter(issues.values()))["detail"] == text
+
+
+def test_permission_warning_survives_reload_and_unrelated_success_until_retry_succeeds(service, monkeypatch):
+    import httpx
+    original = httpx.Client
+    forbidden = True
+    def respond(request):
+        if request.method == "POST" and forbidden:
+            return httpx.Response(403, json={"success": False, "errors": [{"code": 10000}]})
+        return httpx.Response(200, json={"success": True, "result": {"id": "test"}})
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
+    path = "/accounts/" + "a" * 32 + "/cfd_tunnel"
+    with pytest.raises(RuntimeError):
+        service.cf.request("POST", path, {})
+    reloaded = Service(service.store.root)
+    assert reloaded.store.get("cloudflare_permission_issues")
+    reloaded.store.db.close()
+    service.cf.request("GET", path)
+    assert service.store.get("cloudflare_permission_issues")
+    forbidden = False
+    service.cf.request("POST", path, {})
+    assert service.store.get("cloudflare_permission_issues") == {}
 
 
 def test_cloudflare_zone_error_identifies_optional_read_token(service, monkeypatch):

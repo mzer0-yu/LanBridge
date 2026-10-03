@@ -65,10 +65,20 @@ class Cloudflare:
                 response = client.request(method, "https://api.cloudflare.com/client/v4" + path,
                                           headers={"Authorization": "Bearer " + token}, json=body)
             if response.status_code >= 400:
-                raise RuntimeError(self.failure_hint(method, path, response, credential))
+                detail = self.failure_hint(method, path, response, credential)
+                if response.status_code in (401, 403):
+                    with self.service.lock:
+                        issues = self.service.store.get("cloudflare_permission_issues", {})
+                        issues[digest([method, path])] = {"detail": detail, "http_status": response.status_code, "credential": credential, "checked_at": time.time()}
+                        self.service.store.set("cloudflare_permission_issues", issues)
+                raise RuntimeError(detail)
             payload = response.json()
             if not payload.get("success"):
                 raise RuntimeError("Cloudflare API 拒绝操作，请检查账户权限和配置")
+            with self.service.lock:
+                issues = self.service.store.get("cloudflare_permission_issues", {})
+                if issues.pop(digest([method, path]), None):
+                    self.service.store.set("cloudflare_permission_issues", issues)
             return payload.get("result")
         except (httpx.HTTPError, ValueError) as exc:
             if isinstance(exc, ValueError) and str(exc).startswith("请"):

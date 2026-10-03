@@ -128,6 +128,7 @@ def create_admin(service):
     def state():
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
+                "cloudflare_permission_issues": list(service.store.get("cloudflare_permission_issues", {}).values()),
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")
