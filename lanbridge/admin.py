@@ -126,8 +126,15 @@ def create_admin(service):
 
     @app.get("/api/state")
     def state():
+        with service.store.lock:
+            publication = service.store.db.execute("SELECT action FROM audit WHERE action IN ('publish_verified','publish_incomplete') ORDER BY id DESC LIMIT 1").fetchone()
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+                "published_hosts": service.store.get("published_hosts", []),
+                "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
+                "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
+                "cloudflare_permission_issues": list(service.store.get("cloudflare_permission_issues", {}).values()),
+                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": service.store.get("managed_business_token"), "pending": service.store.get("pending_business_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")
@@ -163,6 +170,9 @@ def create_admin(service):
                     if not 10 <= len(value) <= 4096:
                         raise ValueError("令牌长度无效")
                     service.store.set_secret(k, value)
+                    if k == "cf_write_token":
+                        service.store.set("managed_business_token", None)
+                        service.store.set("pending_business_token", None)
             service.store.audit("credentials_updated", {})
         return {"saved": True}
 
@@ -189,6 +199,14 @@ def create_admin(service):
     async def cloudflare(action: str, request: Request):
         import asyncio
         data = await body(request)
+        if action == "provision-token":
+            from .token_manager import TokenManager
+            if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool):
+                raise ValueError("授权令牌或选项格式无效")
+            return await asyncio.to_thread(TokenManager(service).provision, data.get("authority", ""), data.get("remember", False), data.get("human_check", True))
+        if action == "forget-token-authority":
+            service.store.set_secret("cf_token_authority", "")
+            return {"removed": True}
         if action == "create-tunnel":
             return await asyncio.to_thread(service.cf.create_tunnel)
         if action == "turnstile":
@@ -204,11 +222,18 @@ def create_admin(service):
         raise ValueError("操作不存在")
 
     @app.post("/api/connector/{action}")
-    def connector(action: str):
+    async def connector(action: str, request: Request):
+        import asyncio
+        data = await body(request)
+        if action == "ensure":
+            path = data.get("path")
+            if path is not None and not isinstance(path, str):
+                raise ValueError("路径必须为文本")
+            return await asyncio.to_thread(service.connector.ensure, path)
         if action == "start":
-            return service.connector.start()
+            return await asyncio.to_thread(service.connector.start)
         if action == "stop":
-            return service.connector.stop()
+            return await asyncio.to_thread(service.connector.stop)
         raise ValueError("操作不存在")
 
     return app

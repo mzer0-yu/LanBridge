@@ -9,6 +9,54 @@ from lanbridge.service import Service, lan_address, pinned_origin
 from lanbridge.store import password_hash, password_check
 
 
+def test_cloudflare_forbidden_names_operation_without_echoing_upstream_secrets(service, monkeypatch):
+    import httpx
+    original = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, json={"success": False, "errors": [{"code": 10000, "message": "sensitive-upstream-value"}]}))
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=transport, **kw))
+    with pytest.raises(RuntimeError) as failure:
+        service.cf.request("POST", "/accounts/" + "a" * 32 + "/cfd_tunnel", {"name": "example"})
+    text = str(failure.value)
+    assert "HTTP 403" in text and "创建 Tunnel" in text and "写入 API Token" in text
+    assert "10000" in text and "Cloudflare Tunnel Write" in text
+    assert "sensitive-upstream-value" not in text and "test-only-cloudflare-token" not in text
+    assert len(text) < 400
+    issues = service.store.get("cloudflare_permission_issues")
+    assert len(issues) == 1 and next(iter(issues.values()))["detail"] == text
+
+
+def test_permission_warning_survives_reload_and_unrelated_success_until_retry_succeeds(service, monkeypatch):
+    import httpx
+    original = httpx.Client
+    forbidden = True
+    def respond(request):
+        if request.method == "POST" and forbidden:
+            return httpx.Response(403, json={"success": False, "errors": [{"code": 10000}]})
+        return httpx.Response(200, json={"success": True, "result": {"id": "test"}})
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
+    path = "/accounts/" + "a" * 32 + "/cfd_tunnel"
+    with pytest.raises(RuntimeError):
+        service.cf.request("POST", path, {})
+    reloaded = Service(service.store.root)
+    assert reloaded.store.get("cloudflare_permission_issues")
+    reloaded.store.db.close()
+    service.cf.request("GET", path)
+    assert service.store.get("cloudflare_permission_issues")
+    forbidden = False
+    service.cf.request("POST", path, {})
+    assert service.store.get("cloudflare_permission_issues") == {}
+
+
+def test_cloudflare_zone_error_identifies_optional_read_token(service, monkeypatch):
+    import httpx
+    service.store.set_secret("cf_read_token", "read-test-token")
+    original = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, text="not-json"))
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=transport, **kw))
+    with pytest.raises(RuntimeError, match="读取域名.*只读 API Token"):
+        service.cf.zone()
+
+
 @pytest.fixture
 def service(tmp_path):
     result = Service(tmp_path / "data")
@@ -57,6 +105,25 @@ def test_encrypted_secrets_and_password_hash(service):
     assert password_check("correct horse battery", hashed)
     assert not password_check("wrong", hashed)
     assert "correct horse" not in hashed
+
+
+def test_mcp_bridge_uses_admin_login_and_csrf(service, monkeypatch):
+    from mcp_server import Bridge
+    client = TestClient(create_admin(service), base_url="http://127.0.0.1:8890", headers={"Origin": "http://127.0.0.1:8890"})
+    assert client.post("/api/connector/ensure", json={}).status_code == 401
+    password = "test-only-admin-password"
+    assert client.post("/api/setup", json={"username": "admin", "password": password}).status_code == 200
+    monkeypatch.setenv("LANBRIDGE_ADMIN_PASSWORD", password)
+    monkeypatch.setattr(service.connector, "ensure", lambda path=None: {"path": "test-path", "source": "local"})
+    bridge = Bridge()
+    bridge.client.close()
+    bridge.client = client
+    assert bridge.call("lanbridge_status", {})["cloudflare_setup"]["ready"]
+    assert bridge.call("lanbridge_prepare_connector", {})["source"] == "local"
+    with pytest.raises(ValueError, match="参数无效"):
+        bridge.call("lanbridge_prepare_connector", {"password": password})
+    assert client.post("/api/connector/ensure", json={}).status_code == 403
+    assert client.post("/api/connector/ensure", json={"path": 123}, headers={"X-CSRF-Token": bridge.csrf}).status_code == 400
 
 
 def test_admin_host_origin_auth_and_csrf(service):
