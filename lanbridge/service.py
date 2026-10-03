@@ -237,6 +237,18 @@ class Connector:
         self.service, self.process = service, None
         self.started_at = None
         self.lock = threading.Lock()
+        self.install_lock = threading.Lock()
+
+    def ensure(self, configured=None):
+        from .tools import ensure_cloudflared
+        with self.install_lock:
+            result = ensure_cloudflared(self.service.settings()["cloudflared_path"] if configured is None else configured)
+            with self.service.lock:
+                cfg = self.service.settings()
+                cfg["cloudflared_path"] = result["path"]
+                self.service.store.set("settings", cfg)
+                self.service.store.audit("connector_prepared", {"source": result["source"], "version": result["version"]})
+            return result
 
     def status(self):
         cfg = self.service.settings()
@@ -251,11 +263,9 @@ class Connector:
             if self.status()["running"]:
                 return self.status()
             cfg = self.service.settings()
-            path = cfg["cloudflared_path"] or shutil.which("cloudflared")
-            if not path or not Path(path).is_file():
-                raise ValueError("未找到 cloudflared，请填写可执行文件的完整路径")
             if not self.service.store.secret("tunnel_token"):
                 raise ValueError("请先创建 Tunnel 并保存连接令牌")
+            path = self.ensure()["path"]
             # Ensure both listeners are running before creating public reachability.
             for port in (cfg["gateway_port"], cfg["admin_port"]):
                 with socket.create_connection(("127.0.0.1", port), timeout=2):

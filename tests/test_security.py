@@ -59,6 +59,25 @@ def test_encrypted_secrets_and_password_hash(service):
     assert "correct horse" not in hashed
 
 
+def test_mcp_bridge_uses_admin_login_and_csrf(service, monkeypatch):
+    from mcp_server import Bridge
+    client = TestClient(create_admin(service), base_url="http://127.0.0.1:8890", headers={"Origin": "http://127.0.0.1:8890"})
+    assert client.post("/api/connector/ensure", json={}).status_code == 401
+    password = "test-only-admin-password"
+    assert client.post("/api/setup", json={"username": "admin", "password": password}).status_code == 200
+    monkeypatch.setenv("LANBRIDGE_ADMIN_PASSWORD", password)
+    monkeypatch.setattr(service.connector, "ensure", lambda path=None: {"path": "test-path", "source": "local"})
+    bridge = Bridge()
+    bridge.client.close()
+    bridge.client = client
+    assert bridge.call("lanbridge_status", {})["cloudflare_setup"]["ready"]
+    assert bridge.call("lanbridge_prepare_connector", {})["source"] == "local"
+    with pytest.raises(ValueError, match="参数无效"):
+        bridge.call("lanbridge_prepare_connector", {"password": password})
+    assert client.post("/api/connector/ensure", json={}).status_code == 403
+    assert client.post("/api/connector/ensure", json={"path": 123}, headers={"X-CSRF-Token": bridge.csrf}).status_code == 400
+
+
 def test_admin_host_origin_auth_and_csrf(service):
     client = TestClient(create_admin(service), base_url="http://127.0.0.1:8890")
     assert client.get("/api/state").status_code == 401

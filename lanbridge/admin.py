@@ -204,11 +204,18 @@ def create_admin(service):
         raise ValueError("操作不存在")
 
     @app.post("/api/connector/{action}")
-    def connector(action: str):
+    async def connector(action: str, request: Request):
+        import asyncio
+        data = await body(request)
+        if action == "ensure":
+            path = data.get("path")
+            if path is not None and not isinstance(path, str):
+                raise ValueError("路径必须为文本")
+            return await asyncio.to_thread(service.connector.ensure, path)
         if action == "start":
-            return service.connector.start()
+            return await asyncio.to_thread(service.connector.start)
         if action == "stop":
-            return service.connector.stop()
+            return await asyncio.to_thread(service.connector.stop)
         raise ValueError("操作不存在")
 
     return app

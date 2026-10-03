@@ -70,7 +70,7 @@ def serve(service):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LanBridge 管理平台 · CLI/API 共用业务核心")
+    parser = argparse.ArgumentParser(description="LanBridge 管理平台 · CLI / API / MCP / SKILL")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("capabilities")
@@ -89,9 +89,10 @@ def main():
     apply = sub.add_parser("apply")
     apply.add_argument("--revision", required=True)
     sub.add_parser("check")
+    sub.add_parser("ensure-connector")
     args = parser.parse_args()
     if args.command == "capabilities":
-        print(json.dumps({"schema": "lanbridge-capabilities/v1", "commands": list(sub.choices), "shared_business_core": True, "admin_loopback_only": True, "preview_required": True, "secrets_in_arguments": False}, ensure_ascii=False, indent=2))
+        print(json.dumps({"schema": "lanbridge-capabilities/v1", "commands": list(sub.choices), "interfaces": ["cli", "api", "mcp", "skill"], "shared_business_core": True, "admin_loopback_only": True, "preview_required": True, "secrets_in_arguments": False}, ensure_ascii=False, indent=2))
         return 0
     try:
         service = Service(args.data_dir.resolve())
@@ -141,6 +142,8 @@ def main():
                 result = service.cf.create_widget()
             elif args.command == "preview":
                 result = service.cf.plan()
+            elif args.command == "ensure-connector":
+                result = service.connector.ensure()
             elif args.command == "apply":
                 result = service.cf.apply(args.revision)
             else:

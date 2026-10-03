@@ -13,7 +13,7 @@ Set-Location <本项目目录>
 
 管理台仅监听 `127.0.0.1:8890`，公网访问网关仅监听 `127.0.0.1:8891`，由 cloudflared 在本机连接。关闭平台会停止它自己启动的连接器。未配置系统服务或登录自启。Windows DPAPI 使用当前用户身份；请在当前用户终端运行，受限沙箱身份无法解密该用户的保险库。
 
-新电脑需要 Python 3.12+，先运行 `install.ps1 -PythonPath <python.exe 完整路径>`。项目附带 `bin/cloudflared.exe`，版本 2026.9.3；可以在配置页指定其他受信任的官方 cloudflared。
+新电脑需要 Python 3.12+，先运行 `install.ps1 -PythonPath <python.exe 完整路径>`。管理界面的 cloudflared 路径可留空：点击字段旁的“自动检测 / 下载”，先查系统 PATH，再查项目 `bin/`，找不到则从 Cloudflare 官方 GitHub 发布下载到 `bin/cloudflared.exe`。使用发布 SHA-256 和大小校验后检测版本、保存路径；失败可重试或手动指定路径。Windows 启动连接器时也会自动准备，已有明确路径不会被静默替换。二进制不提交到仓库。
 
 ## 接入第一个网站
 
@@ -135,3 +135,15 @@ CLI run.py ───────────────────────
 - [Turnstile Widget API](https://developers.cloudflare.com/turnstile/get-started/widget-management/api/)
 - [Turnstile 服务端验证](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
 - [cloudflared 源码及许可证](https://github.com/cloudflare/cloudflared)
+
+
+## 四种调用入口
+
+- **CLI**：`run.py capabilities`、`status`、`ensure-connector` 等，共用业务核心。
+- **API**：管理台的本机 `/api/`，使用管理员 Cookie、Origin 和 CSRF 校验。`POST /api/connector/ensure` 的 JSON 为 `{}`（使用已保存路径）或 `{"path":""}`（自动检测）。
+- **MCP**：`mcp_server.py` 提供 stdio 工具；连接正在运行的本机 API。支持状态、网站保存、连接器准备/启停、Tunnel 创建、Turnstile 同步和预览/发布。
+- **SKILL**：项目的 `skills/lanbridge/SKILL.md` 提供调用流程，可按需复制到代理支持的技能目录；不自动修改你的全局代理配置。
+
+MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，args 是 `mcp_server.py` 的绝对路径。通过客户端安全环境配置提供 `LANBRIDGE_ADMIN_USERNAME` 和 `LANBRIDGE_ADMIN_PASSWORD`；可选 `LANBRIDGE_ADMIN_URL` 默认 `http://127.0.0.1:8890`。不要将真实密码放入仓库内的配置文件。桥接器只连接 loopback，不读取本机保险库，不通过 MCP 参数接收 Cloudflare 令牌或访客密码。普通网站保存支持 MCP；需要新建访客口令时在管理界面完成。平台需要先启动，MCP 桥接器不自行创建管理员或启动公网连接。
+
+官方安装来源：[Cloudflare cloudflared 下载说明](https://developers.cloudflare.com/tunnel/downloads/)。
