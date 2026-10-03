@@ -19,6 +19,18 @@ const setupFields = [
   {key:'zone_name', label:'Zone 名称', selector:'#settings-form [name=zone_name]', help:'填写已接入 Cloudflare 的域名，例如 example.com。'},
   {key:'cf_write_token', label:'写入 API Token', selector:'#credentials-form [name=cf_write_token]', help:'粘贴 Cloudflare API Token，再点击“加密保存凭据”。令牌不会回显。'}
 ];
+function tokenTemplateURL(cfg){
+  if(!/^[a-f0-9]{32}$/i.test(cfg.account_id||'')||!/^[a-f0-9]{32}$/i.test(cfg.zone_id||''))return null;
+  const params=new URLSearchParams({permissionGroupKeys:JSON.stringify([{key:'dns',type:'edit'},{key:'zone',type:'read'}]),accountId:cfg.account_id,zoneId:cfg.zone_id,name:'LanBridge'});
+  return 'https://dash.cloudflare.com/profile/api-tokens?'+params.toString();
+}
+function renderTokenTemplate(){
+  const link=$('#token-template-link'),url=tokenTemplateURL(state.settings);
+  if(url)link.href=url;else link.removeAttribute('href');
+  link.setAttribute('aria-disabled',String(!url));
+  link.title=url?'在 Cloudflare 确认权限后生成令牌':'请先保存有效的 Account ID 和 Zone ID';
+  $('#token-template-status').textContent=url?'预填 DNS Edit、Zone Read、名称 LanBridge 和当前账户 / Zone。进入 Cloudflare 后还需添加账户 Tunnel Edit，以及自动管理验证所需的 Turnstile Edit；确认后创建，复制回来加密保存。':'请先填写并保存有效的 Account ID 和 Zone ID；保存后此入口自动启用。';
+}
 function pendingSetup(){return setupFields.filter(field=>!state?.cloudflare_setup || state.cloudflare_setup.missing.includes(field.label));}
 function setupMessage(){return '还需完成：'+pendingSetup().map(field=>field.label).join('、');}
 function locateSetup(key){
@@ -30,6 +42,7 @@ function locateSetup(key){
   input.focus({preventScroll:true});
 }
 function renderSetup(){
+  renderTokenTemplate();
   const missing=pendingSetup(),ready=!!state?.cloudflare_setup?.ready,button=$('#add-site');
   button.disabled=!ready;
   button.textContent=ready?'＋ 添加网站':'添加网站（请先完成配置）';
