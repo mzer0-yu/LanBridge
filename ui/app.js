@@ -1,7 +1,7 @@
 'use strict';
 const $ = s => document.querySelector(s);
 let csrf = '', initialized = false, state = null, currentView = 'overview', plan = null, toastTimer;
-const titles = {interfaces:['选择适合你的调用方式。','在这里查看 CLI、API、MCP 与 SKILL 的用途、配置和示例。','调用方式'],overview:['公网访问，一处管理。','连接局域网服务，为每个入口设置合适的访问边界。','总览'],sites:['让网页走出局域网。','为每个服务绑定公网域名，完整转发网页与 API。','网站映射'],security:['每个入口，都有边界。','为不同网站组合人类验证、访问口令与访问范围。','访问策略'],connector:['连接，从这里开始。','创建Tunnel，预览路由并管理 Windows 连接器。','连接器'],audit:['每次变更，都可追溯。','核对管理员操作、发布结果与需要继续处理的变更。','操作审计'],settings:['账户与本机配置。','连接你的 Cloudflare 账户，凭据只在本机加密保存。','账户与配置']};
+const titles = {interfaces:['选择适合你的调用方式。','在这里查看 CLI、API、MCP 与 SKILL 的用途、配置和示例。','调用方式'],overview:['公网访问，一处管理。','连接局域网服务，为每个入口设置合适的访问边界。','总览'],sites:['让网页走出局域网。','为每个服务绑定公网域名，完整转发网页与 API。','网站映射'],security:['每个入口，都有边界。','为不同网站组合人类验证、访问口令与访问范围。','访问策略'],connector:['连接，从这里开始。','创建Tunnel，预览路由并管理 Windows 连接器。','连接器'],audit:['每次变更，都可追溯。','核对管理员操作、发布结果与需要继续处理的变更。','操作审计'],settings:['账户与配置','连接你的 Cloudflare 账户，凭据只在本机加密保存。','账户与配置']};
 const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(message, error=false){clearTimeout(toastTimer);const el=$('#toast');el.textContent=message;el.className=error?'error':'';el.hidden=false;toastTimer=setTimeout(()=>el.hidden=true,6500)}
 async function api(path, data){const options=data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(data)};const r=await fetch('/api/'+path,options);let body;try{body=await r.json()}catch{throw Error('服务器暂不可用')}if(!r.ok){if(r.status===401&&path!=='login')showAuth();throw Error(typeof body.detail==='string'?body.detail:'输入格式无效')}return body}
