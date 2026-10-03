@@ -69,6 +69,7 @@ class Settings(BaseModel):
     @field_validator("account_id", "zone_id")
     @classmethod
     def cf_id(cls, v):
+        v = v.strip().lower()
         if v and not re.fullmatch("[a-fA-F0-9]{32}", v):
             raise ValueError("Cloudflare Account/Zone ID 必须为 32 位十六进制")
         return v
@@ -76,6 +77,7 @@ class Settings(BaseModel):
     @field_validator("tunnel_id")
     @classmethod
     def tunnel(cls, v):
+        v = v.strip().lower()
         if v and not re.fullmatch("[a-fA-F0-9-]{36}", v):
             raise ValueError("Tunnel ID 格式无效")
         return v

@@ -39,7 +39,7 @@ def acquire_runtime(root):
     return handle
 
 
-def serve(service):
+def serve(service, open_browser=False):
     import uvicorn
     from lanbridge.admin import create_admin
     from lanbridge.gateway import create_gateway
@@ -57,9 +57,22 @@ def serve(service):
         thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
         thread.start()
         print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}  |  网关：127.0.0.1:{cfg["gateway_port"]}', flush=True)
-        print("Cloudflare 连接器需在管理台手动启动；Ctrl+C 停止本平台及其连接器。", flush=True)
+        print("Cloudflare 连接器需在管理台手动启动；点击“退出 LanBridge”或按 Ctrl+C 停止本平台及其连接器。", flush=True)
+        admin = None
+        def shutdown():
+            admin.should_exit = True
+        admin = uvicorn.Server(uvicorn.Config(create_admin(service, shutdown), host="127.0.0.1", port=cfg["admin_port"], proxy_headers=False, access_log=False, log_level="warning"))
+        if open_browser:
+            def show_browser():
+                import time
+                import webbrowser
+                while not admin.started and not admin.should_exit:
+                    time.sleep(0.1)
+                if admin.started and not admin.should_exit:
+                    webbrowser.open(f'http://127.0.0.1:{cfg["admin_port"]}')
+            threading.Thread(target=show_browser, daemon=True).start()
         try:
-            uvicorn.Server(uvicorn.Config(create_admin(service), host="127.0.0.1", port=cfg["admin_port"], proxy_headers=False, access_log=False, log_level="warning")).run(sockets=[sockets[0]])
+            admin.run(sockets=[sockets[0]])
         finally:
             service.connector.stop()
             gateway.should_exit = True
@@ -74,7 +87,8 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("capabilities")
-    sub.add_parser("serve")
+    server = sub.add_parser("serve")
+    server.add_argument("--open-browser", action="store_true")
     sub.add_parser("status")
     sub.add_parser("setup-admin")
     credential = sub.add_parser("configure-secret")
@@ -102,7 +116,7 @@ def main():
         lock = acquire_runtime(service.store.root) if args.command != "status" else None
         try:
             if args.command == "serve":
-                serve(service)
+                serve(service, args.open_browser)
                 return 0
             if args.command == "setup-admin":
                 if service.store.get("admin"):
