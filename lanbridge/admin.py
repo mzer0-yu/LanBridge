@@ -129,6 +129,7 @@ def create_admin(service):
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
                 "cloudflare_permission_issues": list(service.store.get("cloudflare_permission_issues", {}).values()),
+                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": service.store.get("managed_business_token"), "pending": service.store.get("pending_business_token")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")
@@ -164,6 +165,9 @@ def create_admin(service):
                     if not 10 <= len(value) <= 4096:
                         raise ValueError("令牌长度无效")
                     service.store.set_secret(k, value)
+                    if k == "cf_write_token":
+                        service.store.set("managed_business_token", None)
+                        service.store.set("pending_business_token", None)
             service.store.audit("credentials_updated", {})
         return {"saved": True}
 
@@ -190,6 +194,14 @@ def create_admin(service):
     async def cloudflare(action: str, request: Request):
         import asyncio
         data = await body(request)
+        if action == "provision-token":
+            from .token_manager import TokenManager
+            if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool):
+                raise ValueError("授权令牌或选项格式无效")
+            return await asyncio.to_thread(TokenManager(service).provision, data.get("authority", ""), data.get("remember", False), data.get("human_check", True))
+        if action == "forget-token-authority":
+            service.store.set_secret("cf_token_authority", "")
+            return {"removed": True}
         if action == "create-tunnel":
             return await asyncio.to_thread(service.cf.create_tunnel)
         if action == "turnstile":

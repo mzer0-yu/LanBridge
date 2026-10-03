@@ -84,6 +84,9 @@ def main():
     site = sub.add_parser("save-site")
     site.add_argument("file", type=Path)
     sub.add_parser("create-tunnel")
+    provision = sub.add_parser("provision-token")
+    provision.add_argument("--remember", action="store_true")
+    provision.add_argument("--without-turnstile", action="store_true")
     sub.add_parser("turnstile")
     sub.add_parser("preview")
     apply = sub.add_parser("apply")
@@ -138,6 +141,10 @@ def main():
                 result = {"settings": service.settings(), "sites": service.sites(), "cloudflare": service.store.get("cloudflare_status"), "note": "连接器实时进程状态请查管理台 API"}
             elif args.command == "create-tunnel":
                 result = service.cf.create_tunnel()
+            elif args.command == "provision-token":
+                from lanbridge.token_manager import TokenManager
+                authority = getpass.getpass("API Tokens Write 授权令牌（已有加密授权可留空）：")
+                result = TokenManager(service).provision(authority, args.remember, not args.without_turnstile)
             elif args.command == "turnstile":
                 result = service.cf.create_widget()
             elif args.command == "preview":

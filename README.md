@@ -147,3 +147,17 @@ CLI run.py ───────────────────────
 MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，args 是 `mcp_server.py` 的绝对路径。通过客户端安全环境配置提供 `LANBRIDGE_ADMIN_USERNAME` 和 `LANBRIDGE_ADMIN_PASSWORD`；可选 `LANBRIDGE_ADMIN_URL` 默认 `http://127.0.0.1:8890`。不要将真实密码放入仓库内的配置文件。桥接器只连接 loopback，不读取本机保险库，不通过 MCP 参数接收 Cloudflare 令牌或访客密码。普通网站保存支持 MCP；需要新建访客口令时在管理界面完成。平台需要先启动，MCP 桥接器不自行创建管理员或启动公网连接。
 
 官方安装来源：[Cloudflare cloudflared 下载说明](https://developers.cloudflare.com/tunnel/downloads/)。
+
+## 自动配置业务 API Token
+
+账户与配置页提供“自动配置 API Token”。首次打开 Cloudflare 用户 API Tokens 页面，使用 **Create Additional Tokens** 模板创建具有 **API Tokens Write** 权限的授权令牌。它不同于 Account API Tokens Write；当前入口使用用户令牌 API。
+
+输入授权令牌后，平台从 API 获取权限组 ID，自动创建限定当前 Account ID 的 Tunnel Write 和限定当前 Zone ID 的 DNS Write、Zone Read 业务令牌；可选择 Turnstile Write。业务令牌加密保存，不返回页面。授权令牌默认仅用于本次请求，勾选记住后独立加密保存，也可从界面移除本机副本。授权令牌可管理用户 API 令牌，应妥善保管。
+
+再次点击自动配置会更新平台自己创建且与本机凭据匹配的托管令牌，不修改其他手动令牌。手动替换业务令牌会解除托管。创建结果未知时阻止重复 POST，页面展示唯一名称供核对；可通过手动配置接入已有令牌。移除本机授权不撤销 Cloudflare 中的令牌。
+
+- CLI：`run.py provision-token`，通过隐藏提示输入授权；`--remember` 保存授权，`--without-turnstile` 不授予 Turnstile。CLI 写操作要求先停止管理服务。
+- API：`POST /api/cloudflare/provision-token`，需要管理员会话、Origin 和 CSRF；字段 `authority`、`remember`、`human_check`。`POST /api/cloudflare/forget-token-authority` 移除本机授权。
+- MCP：`lanbridge_provision_token`，仅使用管理台已加密保存的授权，可传 `human_check`，不接受令牌文本。
+
+参考：https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/
