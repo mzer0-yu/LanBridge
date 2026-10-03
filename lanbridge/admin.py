@@ -126,10 +126,15 @@ def create_admin(service):
 
     @app.get("/api/state")
     def state():
+        with service.store.lock:
+            publication = service.store.db.execute("SELECT action FROM audit WHERE action IN ('publish_verified','publish_incomplete') ORDER BY id DESC LIMIT 1").fetchone()
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+                "published_hosts": service.store.get("published_hosts", []),
+                "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
+                "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
                 "cloudflare_permission_issues": list(service.store.get("cloudflare_permission_issues", {}).values()),
-                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": service.store.get("managed_business_token"), "pending": service.store.get("pending_business_token")},
+                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": service.store.get("managed_business_token"), "pending": service.store.get("pending_business_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")

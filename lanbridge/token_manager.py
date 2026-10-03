@@ -27,7 +27,9 @@ class TokenManager:
             if response.status_code >= 400 or not payload.get("success"):
                 codes = [str(e["code"]) for e in payload.get("errors", []) if isinstance(e, dict) and isinstance(e.get("code"), int)]
                 suffix = "，错误码 " + ",".join(codes[:3]) if codes else ""
-                raise RuntimeError(f"Cloudflare 令牌管理 HTTP {response.status_code}{suffix}。请使用 Create Additional Tokens 模板创建的用户授权令牌（API Tokens Write），并检查有效期及 IP 限制。")
+                detail = f"Cloudflare 令牌管理 HTTP {response.status_code}{suffix}。请使用 Create Additional Tokens 模板创建的用户授权令牌（API Tokens Write），并检查有效期及 IP 限制。"
+                self.service.store.set("token_management_error", {"detail": detail, "checked_at": time.time()})
+                raise RuntimeError(detail)
             return payload.get("result")
         except httpx.HTTPError:
             raise RuntimeError("Cloudflare 令牌管理网络异常；若创建结果未知，请按页面提示核对，勿重复创建。") from None
@@ -102,4 +104,5 @@ class TokenManager:
                 store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("managed_business_token", json.dumps(owned)))
                 store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("pending_business_token", "null"))
             store.audit("business_token_" + action, {"id": owned["id"], "human_check": human_check})
+            store.set("token_management_error", None)
             return {"action": action, "id": owned["id"], "saved": True, "human_check": human_check}

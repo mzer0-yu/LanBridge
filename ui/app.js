@@ -8,10 +8,10 @@ async function api(path, data){const options=data===undefined?{}:{method:'POST',
 function showAuth(){csrf='';$('#auth').hidden=false;$('#shell').hidden=true;$('#auth-title').textContent=initialized?'欢迎回来。':'创建管理员账户。';$('#auth-desc').textContent=initialized?'登录管理员平台，管理公网入口与访问权限。':'首次使用，请设置本机管理员。密码至少 12 位。';$('#auth-submit').textContent=initialized?'登录管理台 →':'创建账户并登录 →';$('#auth-form [name=password]').minLength=initialized?1:12;$('#auth-form [name=password]').autocomplete=initialized?'current-password':'new-password'}
 async function loadState(){if(!csrf)return;state=await api('state');render();$('#last-refresh').textContent='本机状态更新于 '+new Date().toLocaleTimeString('zh-CN');}
 function openShell(){$('#auth').hidden=true;$('#shell').hidden=false;loadState().catch(e=>toast(e.message,true))}
-function go(view){currentView=view;document.querySelectorAll('.view').forEach(el=>el.hidden=el.id!=='view-'+view);document.querySelectorAll('nav button').forEach(el=>el.classList.toggle('active',el.dataset.view===view));const t=titles[view];$('#page-title').textContent=t[0];$('#page-desc').textContent=t[1];$('#breadcrumb').textContent='工作空间 / '+t[2];$('#add-site').hidden=!['overview','sites','security'].includes(view);if(view==='settings'&&state&&!$('#settings-form').dataset.dirty)fillSettings();if(state)renderSetup();}
+function go(view){currentView=view;document.querySelectorAll('.view').forEach(el=>el.hidden=el.id!=='view-'+view);document.querySelectorAll('nav button').forEach(el=>el.classList.toggle('active',el.dataset.view===view));const t=titles[view];$('#page-title').textContent=t[0];$('#page-desc').textContent=t[1];$('#breadcrumb').textContent='工作空间 / '+t[2];$('#add-site').hidden=!['overview','sites','security'].includes(view);if(view==='settings'&&state&&!$('#settings-form').dataset.dirty)fillSettings();if(state){renderSetup();renderNavigationIssues();}}
 function empty(){const ready=!!state?.cloudflare_setup?.ready;return '<div class="empty"><span class="empty-icon">↗</span><b>第一个公网入口，从这里开始。</b><p>'+ (ready?'账户配置已就绪，添加你想发布的局域网网页。':'先配置 Cloudflare 账户，再添加你想发布的局域网网页。')+'</p>'+(ready?'<button class="text-button" data-add-site="true">添加第一个网站 →</button>':'<button class="text-button" data-goto="settings">配置账户 →</button>')+'</div>'}
 function table(sites){if(!sites.length)return empty();return '<div class="table-wrap"><table><thead><tr><th>网站 / 公网域名</th><th>局域网源站</th><th>访问策略</th><th>本机状态</th><th>操作</th></tr></thead><tbody>'+sites.map(s=>`<tr><td><b>${esc(s.name)}</b><small><a href="https://${esc(s.hostname)}" target="_blank" rel="noreferrer">${esc(s.hostname)} ↗</a></small></td><td>${esc(s.origin)}</td><td>${s.human_check?'<span class="badge success">人类验证</span> ':''}${s.passcode_required?'<span class="badge warning">口令</span>':!s.human_check?'<span class="badge neutral">公开访问</span>':''}<small>${s.allowed_countries.length?esc(s.allowed_countries.join(' · ')):'国家不限'} · ${s.requests_per_minute}/分钟</small></td><td><span class="badge ${s.enabled?'success':'neutral'}">${s.enabled?'已启用':'已停用'}</span><small>路由发布见连接器页</small></td><td><button class="row-action" data-edit="${s.id}">编辑</button><button class="row-action" data-probe="${s.id}">探测</button></td></tr>`).join('')+'</tbody></table></div>'}
-function render(){if(!state)return;renderSetup();renderPermissionIssues();renderTokenManager();renderConnectorReadiness();const sites=state.sites,cfg=state.settings,conn=state.connector,cf=state.cloudflare;$('#nav-count').textContent=sites.length;$('#stat-sites').textContent=sites.length;$('#stat-enabled').textContent=sites.filter(s=>s.enabled).length;$('#stat-human').textContent=sites.filter(s=>s.enabled&&s.human_check).length;const fresh=cf&&(Date.now()/1000-cf.checked_at<150);$('#stat-edge').textContent=fresh?cf.connections:'—';$('#stat-edge-desc').textContent=cf?(fresh?'API 核验 · '+cf.edge_status:'上次核查已过期'):'尚未通过 API 核验';$('#flow-status').textContent=conn.running?'连接器已启动':'连接器未启动';$('#flow-status').className='badge '+(conn.running?'success':'neutral');$('#overview-sites').innerHTML=table(sites.slice(0,5));$('#sites-table').innerHTML=table(sites);$('#connector-status').textContent=conn.running?'运行中':conn.last_exit!=null?'已退出（'+conn.last_exit+'）':'未启动';$('#connector-status').className='badge '+(conn.running?'success':'neutral');$('#connector-path').textContent=cfg.cloudflared_path||(conn.installed?'已从 PATH 找到':'尚未找到 cloudflared.exe');$('#tunnel-id').textContent=cfg.tunnel_id||'尚未创建';$('#gateway-address').textContent='127.0.0.1:'+cfg.gateway_port;$('#edge-detail').textContent=cf?`边缘状态：${cf.edge_status} · 连接数：${cf.connections} · 核查时间：${new Date(cf.checked_at*1000).toLocaleString('zh-CN')}${fresh?'':'（已过期）'}`:'尚未核查远端状态。';$('#widget-status').textContent=cfg.turnstile_sitekey?'Site Key：'+cfg.turnstile_sitekey+' · '+(state.credentials.turnstile_secret?'服务端密钥已保存':'缺少服务端密钥'):'尚未配置；先添加网站，再创建 Widget。';$('#step-sites').textContent=sites.length?'✓':'2';$('#step-tunnel').textContent=cfg.tunnel_id?'✓':'3';$('#security-cards').innerHTML=sites.length?sites.map(s=>`<article class="panel"><div class="panel-heading"><div><h3>${esc(s.name)}</h3><small class="muted">${esc(s.hostname)}</small></div><button class="row-action" data-edit="${s.id}">编辑策略</button></div><div class="policy-list"><div><span>人类验证</span><b>${s.human_check?'Turnstile 服务端校验':'未启用'}</b></div><div><span>访问口令</span><b>${s.passcode_required?'已开启':'未启用'}</b></div><div><span>国家范围</span><b>${s.allowed_countries.length?esc(s.allowed_countries.join(', ')):'不限'}</b></div><div><span>IP 范围</span><b>${s.allowed_ips.length?esc(s.allowed_ips.join(', ')):'不限'}</b></div><div><span>请求速率</span><b>${s.requests_per_minute} 次 / 来源 / 分钟</b></div><div><span>验证会话</span><b>${s.session_minutes} 分钟</b></div></div></article>`).join(''):empty();const actionNames={admin_initialized:'初始化管理员',admin_login:'管理员登录',site_saved:'保存网站策略',settings_saved:'保存账户配置',credentials_updated:'更新加密凭据',tunnel_created:'创建Tunnel',turnstile_updated:'同步 Turnstile',publish_verified:'发布并核验成功',publish_incomplete:'发布未完成，需核对',connector_prepared:'检测 / 安装连接器',connector_started:'启动连接器',connector_stopped:'停止连接器',admin_password_changed:'修改管理员密码'};$('#audit-table').innerHTML=state.audit.length?'<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>资源摘要</th></tr></thead><tbody>'+state.audit.map(a=>`<tr><td>${new Date(a.at*1000).toLocaleString('zh-CN')}</td><td>${esc(actionNames[a.action]||a.action)}</td><td class="audit-detail">${esc(JSON.stringify(a.detail))}</td></tr>`).join('')+'</tbody></table></div>':'<div class="empty">暂时没有审计记录。</div>';$('#read-token-status').textContent=state.credentials.cf_read_token?'已保存':'未配置';$('#secret-status').textContent=state.credentials.turnstile_secret?'已保存':'未配置';if(currentView==='settings'&&!$('#settings-form').dataset.dirty)fillSettings();}
+function render(){if(!state)return;renderSetup();renderPermissionIssues();renderTokenManager();renderConnectorReadiness();renderNavigationIssues();const sites=state.sites,cfg=state.settings,conn=state.connector,cf=state.cloudflare;$('#nav-count').textContent=sites.length;$('#stat-sites').textContent=sites.length;$('#stat-enabled').textContent=sites.filter(s=>s.enabled).length;$('#stat-human').textContent=sites.filter(s=>s.enabled&&s.human_check).length;const fresh=cf&&(Date.now()/1000-cf.checked_at<150);$('#stat-edge').textContent=fresh?cf.connections:'—';$('#stat-edge-desc').textContent=cf?(fresh?'API 核验 · '+cf.edge_status:'上次核查已过期'):'尚未通过 API 核验';$('#flow-status').textContent=conn.running?'连接器已启动':'连接器未启动';$('#flow-status').className='badge '+(conn.running?'success':'neutral');$('#overview-sites').innerHTML=table(sites.slice(0,5));$('#sites-table').innerHTML=table(sites);$('#connector-status').textContent=conn.running?'运行中':conn.last_exit!=null?'已退出（'+conn.last_exit+'）':'未启动';$('#connector-status').className='badge '+(conn.running?'success':'neutral');$('#connector-path').textContent=cfg.cloudflared_path||(conn.installed?'已从 PATH 找到':'尚未找到 cloudflared.exe');$('#tunnel-id').textContent=cfg.tunnel_id||'尚未创建';$('#gateway-address').textContent='127.0.0.1:'+cfg.gateway_port;$('#edge-detail').textContent=cf?`边缘状态：${cf.edge_status} · 连接数：${cf.connections} · 核查时间：${new Date(cf.checked_at*1000).toLocaleString('zh-CN')}${fresh?'':'（已过期）'}`:'尚未核查远端状态。';$('#widget-status').textContent=cfg.turnstile_sitekey?'Site Key：'+cfg.turnstile_sitekey+' · '+(state.credentials.turnstile_secret?'服务端密钥已保存':'缺少服务端密钥'):'尚未配置；先添加网站，再创建 Widget。';$('#step-sites').textContent=sites.length?'✓':'2';$('#step-tunnel').textContent=cfg.tunnel_id?'✓':'3';$('#security-cards').innerHTML=sites.length?sites.map(s=>`<article class="panel"><div class="panel-heading"><div><h3>${esc(s.name)}</h3><small class="muted">${esc(s.hostname)}</small></div><button class="row-action" data-edit="${s.id}">编辑策略</button></div><div class="policy-list"><div><span>人类验证</span><b>${s.human_check?'Turnstile 服务端校验':'未启用'}</b></div><div><span>访问口令</span><b>${s.passcode_required?'已开启':'未启用'}</b></div><div><span>国家范围</span><b>${s.allowed_countries.length?esc(s.allowed_countries.join(', ')):'不限'}</b></div><div><span>IP 范围</span><b>${s.allowed_ips.length?esc(s.allowed_ips.join(', ')):'不限'}</b></div><div><span>请求速率</span><b>${s.requests_per_minute} 次 / 来源 / 分钟</b></div><div><span>验证会话</span><b>${s.session_minutes} 分钟</b></div></div></article>`).join(''):empty();const actionNames={admin_initialized:'初始化管理员',admin_login:'管理员登录',site_saved:'保存网站策略',settings_saved:'保存账户配置',credentials_updated:'更新加密凭据',tunnel_created:'创建Tunnel',turnstile_updated:'同步 Turnstile',publish_verified:'发布并核验成功',publish_incomplete:'发布未完成，需核对',connector_prepared:'检测 / 安装连接器',connector_started:'启动连接器',connector_stopped:'停止连接器',admin_password_changed:'修改管理员密码'};$('#audit-table').innerHTML=state.audit.length?'<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>资源摘要</th></tr></thead><tbody>'+state.audit.map(a=>`<tr><td>${new Date(a.at*1000).toLocaleString('zh-CN')}</td><td>${esc(actionNames[a.action]||a.action)}</td><td class="audit-detail">${esc(JSON.stringify(a.detail))}</td></tr>`).join('')+'</tbody></table></div>':'<div class="empty">暂时没有审计记录。</div>';$('#read-token-status').textContent=state.credentials.cf_read_token?'已保存':'未配置';$('#secret-status').textContent=state.credentials.turnstile_secret?'已保存':'未配置';if(currentView==='settings'&&!$('#settings-form').dataset.dirty)fillSettings();}
 function fillSettings(){const form=$('#settings-form');for(const el of form.elements)if(el.name)el.value=state.settings[el.name]??'';form.dataset.dirty='';}
 const setupFields = [
   {key:'account_id', label:'Account ID', selector:'#settings-form [name=account_id]', help:'填写 Cloudflare 账户 ID，并点击保存配置。'},
@@ -189,4 +189,58 @@ function renderConnectorReadiness(){
   $('#connector-readiness strong').textContent=readiness.kind==='warning'?'连接器需要处理':'连接器尚未启动';
   $('#connector-readiness-detail').textContent=readiness.detail;
   $('#connector-readiness [data-goto=settings]').hidden=readiness.kind!=='warning';
+}
+
+function navigationIssues(current){
+  const issues={overview:[],sites:[],security:[],connector:[],audit:[],settings:[],interfaces:[]};
+  const cfg=current.settings,enabled=current.sites.filter(site=>site.enabled);
+  const missing=current.cloudflare_setup?.missing||[];
+  if(!current.cloudflare_setup?.ready){
+    issues.settings.push('账户配置未完成：'+missing.join('、'));
+    issues.sites.push('添加网站前需完成账户配置：'+missing.join('、'));
+  }
+  for(const issue of current.cloudflare_permission_issues||[]){
+    issues.settings.push(issue.detail);
+    if(issue.detail.includes('Turnstile'))issues.security.push(issue.detail);
+  }
+  if(current.token_management?.error)issues.settings.push(current.token_management.error.detail);
+  if(current.token_management?.pending)issues.settings.push('业务令牌创建结果未知，请在 Cloudflare 核对后接入，勿重复创建');
+  const readiness=connectorReadiness(current);
+  if(readiness.kind==='warning')issues.connector.push(readiness.detail);
+  if(enabled.length&&!current.connector.running)issues.connector.push('有启用的网站，但连接器尚未运行，公网访问需要启动连接器');
+  const humanSites=enabled.filter(site=>site.human_check);
+  if(humanSites.length&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))issues.security.push('启用人类验证的网站缺少 Turnstile 配置或服务端密钥，请创建 / 同步 Widget');
+  for(const site of enabled){
+    const probe=current.site_probes?.[site.id];
+    if(probe?.reachable===false)issues.sites.push(site.name+'：上次源站检查不可达，请检查局域网地址并重新检查');
+  }
+  if(Array.isArray(current.published_hosts)){
+    const desired=enabled.map(site=>site.hostname).sort(),published=[...current.published_hosts].sort();
+    if(JSON.stringify(desired)!==JSON.stringify(published)){
+      issues.sites.push('网站启用状态与已发布的域名不一致，请到连接器预览并发布路由');
+      issues.connector.push('网站路由有待发布变更，请预览并应用配置');
+    }
+  }
+  if(current.publication_needs_review){
+    issues.connector.push('上次发布未完成或核验失败，请重新预览并核对远端变更');
+    issues.audit.push('有未解决的发布失败记录，请到连接器核对并完成发布');
+  }
+  const edge=current.cloudflare;
+  if(current.connector.running&&edge&&Date.now()/1000-edge.checked_at<150&&edge.tunnel_id===cfg.tunnel_id&&edge.edge_status!=='healthy')issues.connector.push('最近 API 核查的 Tunnel 状态为 '+edge.edge_status+'，请检查连接并重新核查');
+  issues.overview=[...new Set(['settings','sites','security','connector','audit'].flatMap(view=>issues[view]))];
+  return issues;
+}
+function renderNavigationIssues(){
+  const issues=navigationIssues(state);
+  for(const [view,reasons] of Object.entries(issues)){
+    const button=$('[data-view='+view+']'),badge=$('#'+view+'-nav-status');
+    if(view==='connector'){
+      if(reasons.length){badge.hidden=false;badge.textContent='待处理';badge.className='nav-status warning';}
+    }else badge.hidden=!reasons.length;
+    if(reasons.length)button.title=[...new Set(reasons)].join('；');
+    else if(view!=='connector')button.title='';
+  }
+  const reasons=[...new Set(issues[currentView]||[])];
+  $('#view-issues').hidden=!reasons.length;
+  $('#view-issues-list').innerHTML=reasons.map(reason=>'<li>'+esc(reason)+'</li>').join('');
 }
