@@ -205,8 +205,8 @@ function navigationIssues(current){
   if(current.token_management?.pending)issues.settings.push('业务令牌创建结果未知，请在 Cloudflare 核对后接入，勿重复创建');
   const readiness=connectorReadiness(current);
   if(readiness.kind==='warning')issues.connector.push(readiness.detail);
-  const humanSites=enabled.filter(site=>site.human_check);
-  if(humanSites.length&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))issues.security.push('启用人类验证的网站缺少 Turnstile 配置或服务端密钥，请创建 / 同步 Widget');
+  const humanSites=enabled.filter(site=>site.human_check&&(current.published_hosts||[]).includes(site.hostname));
+  if(humanSites.length&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))issues.security.push('已发布的网站启用了人类验证，但缺少 Turnstile 配置或服务端密钥，请创建 / 同步 Widget');
   for(const site of enabled){
     const probe=current.site_probes?.[site.id];
     if(probe?.reachable===false&&probe.origin===site.origin)issues.sites.push(site.name+'：上次源站检查不可达，请检查局域网地址并重新检查');

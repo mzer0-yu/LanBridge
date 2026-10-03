@@ -32,7 +32,7 @@ test('source warning is tied to the checked origin; changed or disabled sites re
   const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['sites']);
   state.sites[0].origin='http://127.0.0.1:9400';assert.deepEqual(Array.from(marked(context)),[]);
 });
-test('only enabled human-check sites require Turnstile credentials',()=>{
+test('only published enabled human-check sites report missing Turnstile credentials',()=>{
   const state=ready();state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:true}];state.published_hosts=['app.example.com'];state.credentials.turnstile_secret=false;
   const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['security']);state.credentials.turnstile_secret=true;assert.deepEqual(Array.from(marked(context)),[]);
 });
@@ -44,4 +44,9 @@ test('connector badge resets after recovery and view changes; overview summary h
 test('settings is the last list item without bottom anchoring',()=>{
   const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),css=fs.readFileSync(path.join(root,'ui/style.css'),'utf8');
   const nav=html.match(/<nav>(.*?)<\/nav>/s)[1];assert.equal([...nav.matchAll(/data-view="([^"]+)"/g)].at(-1)[1],'settings');assert(!css.includes('aside nav{flex:1}'));assert(!css.includes('button[data-view=settings]{margin-top:auto}'));
+});
+
+test('unpublished default human-check option is preparation, not a security failure',()=>{
+  const state=ready();state.settings.tunnel_id='';state.settings.turnstile_sitekey='';state.credentials.turnstile_secret=false;state.credentials.tunnel_token=false;state.connector.running=false;state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:true}];
+  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#security-nav-status'].hidden,true);assert.deepEqual(Array.from(marked(context)),['connector']);
 });
