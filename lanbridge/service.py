@@ -69,12 +69,15 @@ class Cloudflare:
                 if response.status_code in (401, 403):
                     with self.service.lock:
                         issues = self.service.store.get("cloudflare_permission_issues", {})
-                        issues[digest([method, path])] = {"detail": detail, "http_status": response.status_code, "credential": credential, "checked_at": time.time()}
+                        cfg = self.service.settings()
+                        issues[digest([method, path])] = {"detail": detail, "http_status": response.status_code, "credential": credential, "checked_at": time.time(), "context": [cfg["account_id"], cfg["zone_id"]], "credential_digest": digest(token)}
                         self.service.store.set("cloudflare_permission_issues", issues)
                 raise RuntimeError(detail)
             payload = response.json()
-            if not payload.get("success"):
+            if not isinstance(payload, dict) or not payload.get("success"):
                 raise RuntimeError("Cloudflare API 拒绝操作，请检查账户权限和配置")
+            if payload.get("result") is None and method != "DELETE":
+                raise RuntimeError("Cloudflare API 未返回有效结果，请核对操作结果后重试")
             with self.service.lock:
                 issues = self.service.store.get("cloudflare_permission_issues", {})
                 if issues.pop(digest([method, path]), None):
@@ -164,6 +167,8 @@ class Cloudflare:
                 self.service.store.set("pending_tunnel_create", None)
                 self.service.store.audit("tunnel_created", {"id": result["id"]})
             token = self.request("GET", self.tunnel_path() + "/token")
+            if not isinstance(token, str) or not 10 <= len(token) <= 4096:
+                raise RuntimeError("Cloudflare 未返回有效的连接令牌，请重试获取令牌")
             self.service.store.set_secret("tunnel_token", token)
             return {"id": result["id"], "token_saved": True}
 
@@ -346,6 +351,20 @@ class Service:
 
     def settings(self):
         return Settings(**self.store.get("settings", {})).model_dump()
+
+    def permission_issues(self):
+        cfg = self.settings()
+        result = []
+        changed = self.store.get("credential_updated_at", {})
+        for issue in self.store.get("cloudflare_permission_issues", {}).values():
+            if issue.get("context") and issue["context"] != [cfg["account_id"], cfg["zone_id"]]:
+                continue
+            credential = issue.get("credential", "cf_write_token")
+            replaced = changed.get(credential, 0) > issue["checked_at"]
+            if issue.get("credential_digest"):
+                replaced = replaced or issue["credential_digest"] != digest(self.store.secret(credential))
+            result.append({k: issue[k] for k in ("detail", "http_status", "credential", "checked_at")} | {"status": "needs_recheck" if replaced else "last_failure"})
+        return result
 
     def sites(self):
         return self.store.get("sites", [])

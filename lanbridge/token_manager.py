@@ -25,7 +25,8 @@ class TokenManager:
             if not isinstance(payload, dict):
                 raise RuntimeError("Cloudflare 令牌管理响应格式异常，请稍后核对。")
             if response.status_code >= 400 or not payload.get("success"):
-                codes = [str(e["code"]) for e in payload.get("errors", []) if isinstance(e, dict) and isinstance(e.get("code"), int)]
+                errors = payload.get("errors") or []
+                codes = [str(e["code"]) for e in errors if isinstance(e, dict) and isinstance(e.get("code"), int)] if isinstance(errors, list) else []
                 suffix = "，错误码 " + ",".join(codes[:3]) if codes else ""
                 detail = f"Cloudflare 令牌管理 HTTP {response.status_code}{suffix}。请使用 Create Additional Tokens 模板创建的用户授权令牌（API Tokens Write），并检查有效期及 IP 限制。"
                 self.service.store.set("token_management_error", {"detail": detail, "checked_at": time.time()})
@@ -40,8 +41,8 @@ class TokenManager:
             raise ValueError("Cloudflare 权限列表格式异常；未创建或修改令牌。")
         def group(names, scope):
             for name in names:
-                matches = [g for g in groups if g.get("name") == name and scope in g.get("scopes", []) and g.get("is_selectable", True)]
-                if len(matches) == 1 and re.fullmatch(r"[a-fA-F0-9]{32}", matches[0].get("id", "")):
+                matches = [g for g in groups if g.get("name") == name and isinstance(g.get("scopes"), list) and scope in g["scopes"] and g.get("is_selectable", True)]
+                if len(matches) == 1 and isinstance(matches[0].get("id"), str) and re.fullmatch(r"[a-fA-F0-9]{32}", matches[0]["id"]):
                     return {"id": matches[0]["id"]}
             raise ValueError("Cloudflare 未提供所需权限：" + names[0] + "；未创建或修改令牌。")
         account_scope, zone_scope = "com.cloudflare.api.account", "com.cloudflare.api.account.zone"
@@ -70,11 +71,23 @@ class TokenManager:
                 if owned["account_id"] != cfg["account_id"] or owned["zone_id"] != cfg["zone_id"]:
                     raise ValueError("托管令牌绑定的账户或域名已变化，请先使用手动配置切换业务令牌。")
                 # Verify the local credential is still the token we created before updating it.
-                verified = self.request(store.secret("cf_write_token"), "GET", "/user/tokens/verify")
-                if not isinstance(verified, dict) or verified.get("id") != owned["id"]:
+                from .service import digest
+                if owned.get("credential_digest"):
+                    if owned["credential_digest"] != digest(store.secret("cf_write_token")):
+                        raise ValueError("当前业务令牌与托管记录不一致，未修改远端令牌。")
+                else:
+                    verified = self.request(store.secret("cf_write_token"), "GET", "/user/tokens/verify")
+                    if not isinstance(verified, dict) or verified.get("id") != owned["id"]:
+                        raise ValueError("当前业务令牌与托管记录不一致，未修改远端令牌。")
+                remote = self.request(authority, "GET", "/user/tokens/" + owned["id"])
+                if not isinstance(remote, dict) or remote.get("id") != owned["id"]:
                     raise ValueError("当前业务令牌与托管记录不一致，未修改远端令牌。")
+                body = {"name": owned["name"], "policies": policies}
+                for key in ("condition", "expires_on", "not_before", "status"):
+                    if remote.get(key) is not None:
+                        body[key] = remote[key]
                 result = self.request(authority, "PUT", "/user/tokens/" + owned["id"],
-                                      {"name": owned["name"], "status": "active", "policies": policies})
+                                      body)
                 if not isinstance(result, dict) or result.get("id") != owned["id"]:
                     raise RuntimeError("Cloudflare 返回的令牌 ID 不匹配，未更新本机记录。")
                 action = "updated"
@@ -90,9 +103,10 @@ class TokenManager:
                     if re.search(r"HTTP 4\d\d", str(exc)):
                         store.set("pending_business_token", None)
                     raise
-                if not isinstance(result, dict) or not re.fullmatch(r"[a-fA-F0-9]{32}", result.get("id", "")) or not isinstance(result.get("value"), str) or not 10 <= len(result["value"]) <= 4096:
+                if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not re.fullmatch(r"[a-fA-F0-9]{32}", result["id"]) or not isinstance(result.get("value"), str) or not 10 <= len(result["value"]) <= 4096:
                     raise RuntimeError("Cloudflare 未返回完整令牌，创建结果需在 Cloudflare 核对。")
-                owned = {"id": result["id"], "name": name, "account_id": cfg["account_id"], "zone_id": cfg["zone_id"]}
+                from .service import digest
+                owned = {"id": result["id"], "name": name, "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "credential_digest": digest(result["value"])}
                 action = "created"
             owned = owned | {"human_check": human_check, "updated_at": time.time()}
             # Credential and ownership record commit together; no token secrets in API results.
@@ -103,6 +117,8 @@ class TokenManager:
                     store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", ("cf_token_authority", store.cipher.encrypt(authority.encode()).decode()))
                 store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("managed_business_token", json.dumps(owned)))
                 store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("pending_business_token", "null"))
+                changed = store.get("credential_updated_at", {}) | {"cf_write_token": time.time()}
+                store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("credential_updated_at", json.dumps(changed)))
             store.audit("business_token_" + action, {"id": owned["id"], "human_check": human_check})
             store.set("token_management_error", None)
             return {"action": action, "id": owned["id"], "saved": True, "human_check": human_check}

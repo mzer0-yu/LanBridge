@@ -40,6 +40,8 @@ def test_create_scoped_token_encrypts_secrets_and_updates_only_owned_token(manag
         elif request.url.path.endswith("verify"):
             assert request.headers["authorization"] == "Bearer child-token-secret-value"
             result = {"id": "c" * 32}
+        elif request.method == "GET":
+            result = {"id": "c" * 32, "condition": {"request_ip": {"in": ["192.0.2.1/32"]}}, "expires_on": "2030-01-01T00:00:00Z", "status": "disabled"}
         elif request.method == "POST":
             result = {"id": "c" * 32, "value": "child-token-secret-value"}
         else:
@@ -57,6 +59,9 @@ def test_create_scoped_token_encrypts_secrets_and_updates_only_owned_token(manag
     assert manager.service.store.secret("cf_token_authority") == "authority-token-secret-value"
     assert manager.provision(human_check=False)["action"] == "updated"
     assert len(json.loads(calls[-1].content)["policies"][0]["permission_groups"]) == 1
+    assert json.loads(calls[-1].content)["status"] == "disabled"
+    assert json.loads(calls[-1].content)["expires_on"] == "2030-01-01T00:00:00Z"
+    assert json.loads(calls[-1].content)["condition"] == {"request_ip": {"in": ["192.0.2.1/32"]}}
     assert len([r for r in calls if r.method == "POST"]) == 1
     plaintext = json.dumps(manager.service.store.audit_list()) + str(manager.service.store.db.execute("SELECT * FROM secrets").fetchall())
     assert "child-token-secret-value" not in plaintext and "authority-token-secret-value" not in plaintext

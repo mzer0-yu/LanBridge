@@ -9,6 +9,79 @@ from lanbridge.service import Service, lan_address, pinned_origin
 from lanbridge.store import password_hash, password_check
 
 
+def admin_client(service):
+    client = TestClient(create_admin(service), base_url="http://127.0.0.1:8890", headers={"Origin": "http://127.0.0.1:8890"})
+    client.post("/api/setup", json={"username": "admin", "password": "correct horse battery"})
+    login = client.post("/api/login", json={"username": "admin", "password": "correct horse battery"})
+    client.headers["X-CSRF-Token"] = login.json()["csrf"]
+    return client
+
+
+def test_credentials_validation_is_atomic(service):
+    client = admin_client(service)
+    original = service.store.secret("cf_write_token")
+    response = client.post("/api/credentials", json={"cf_write_token": "new-valid-write-token", "turnstile_secret": "short"})
+    assert response.status_code == 400
+    assert service.store.secret("cf_write_token") == original
+    assert not service.store.secret("turnstile_secret")
+    response = client.post("/api/credentials", json={"cf_write_token": ["not-a-token"]})
+    assert response.status_code == 400
+    assert service.store.secret("cf_write_token") == original
+
+
+def test_optional_read_token_can_be_removed_without_changing_business_token(service):
+    client = admin_client(service)
+    service.store.set_secret("cf_read_token", "optional-read-token")
+    original = service.store.secret("cf_write_token")
+    response = client.post("/api/credentials", json={"remove_cf_read_token": True})
+    assert response.status_code == 200
+    assert response.json()["credentials"]["cf_read_token"] is False
+    assert service.store.secret("cf_write_token") == original
+
+
+def test_validation_errors_name_fields_without_echoing_raw_input(service):
+    client = admin_client(service)
+    response = client.post("/api/settings", json=service.settings() | {"account_id": "invalid-private-example"})
+    assert response.status_code == 400
+    assert "Account ID" in response.json()["detail"]
+    assert "invalid-private-example" not in response.text
+
+
+def test_cloudflare_ids_normalize_pasted_whitespace_and_case(service):
+    client = admin_client(service)
+    response = client.post("/api/settings", json=service.settings() | {"account_id": " " + "A" * 32 + "\n"})
+    assert response.status_code == 200
+    assert service.settings()["account_id"] == "a" * 32
+
+
+def test_changed_widget_persists_policy_version_and_invalidates_visitor_grants(service):
+    site = add_site(service)
+    client = admin_client(service)
+    old_signing_key = service.store.secret("signing_key")
+    response = client.post("/api/settings", json=service.settings() | {"turnstile_sitekey": "changed-widget"})
+    assert response.status_code == 200
+    assert response.json()["settings"]["turnstile_sitekey"] == "changed-widget"
+    assert service.sites()[0]["policy_version"] != site["policy_version"]
+    assert service.store.secret("signing_key") != old_signing_key
+
+
+def test_permission_error_context_and_replacement_are_reported_without_false_current_failure(service, monkeypatch):
+    import httpx
+    original = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, json={"success": False, "errors": [{"code": 10000}]}))
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=transport, **kw))
+    with pytest.raises(RuntimeError):
+        service.cf.request("POST", "/accounts/" + "a" * 32 + "/cfd_tunnel", {})
+    assert service.permission_issues()[0]["status"] == "last_failure"
+    client = admin_client(service)
+    response = client.post("/api/credentials", json={"cf_write_token": "replacement-business-token"})
+    assert response.status_code == 200 and response.json()["credentials"]["cf_write_token"] is True
+    issue = service.permission_issues()[0]
+    assert issue["status"] == "needs_recheck" and "credential_digest" not in issue
+    service.store.set("settings", service.settings() | {"account_id": "c" * 32})
+    assert service.permission_issues() == []
+
+
 def test_cloudflare_forbidden_names_operation_without_echoing_upstream_secrets(service, monkeypatch):
     import httpx
     original = httpx.Client

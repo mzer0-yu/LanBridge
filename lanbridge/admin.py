@@ -10,6 +10,7 @@ from .gateway import Limiter
 from .models import Settings
 from .service import pinned_origin
 from .store import password_check, password_hash
+from pydantic import ValidationError
 
 
 def create_admin(service):
@@ -40,6 +41,10 @@ def create_admin(service):
         except (ValueError, RuntimeError, OSError) as exc:
             # Exceptions never include raw Cloudflare response or secret payloads.
             detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else "本机服务操作失败，请检查路径、权限或网络"
+            if isinstance(exc, ValidationError):
+                labels = {"account_id": "Account ID", "zone_id": "Zone ID", "zone_name": "Zone 名称", "hostname": "公网域名", "origin": "局域网地址", "name": "网站名称", "allowed_ips": "IP 范围", "allowed_countries": "国家范围", "session_minutes": "会话时长", "requests_per_minute": "请求速率"}
+                fields = [labels.get(str(error["loc"][0]), str(error["loc"][0])) for error in exc.errors() if error.get("loc")]
+                detail = "请检查以下字段的格式或范围：" + "、".join(dict.fromkeys(fields))
             if detail.startswith("{") or len(detail) > 400:
                 detail = "输入格式不正确，请检查配置"
             response = JSONResponse({"detail": detail}, 400)
@@ -128,13 +133,16 @@ def create_admin(service):
     def state():
         with service.store.lock:
             publication = service.store.db.execute("SELECT action FROM audit WHERE action IN ('publish_verified','publish_incomplete') ORDER BY id DESC LIMIT 1").fetchone()
+        managed = service.store.get("managed_business_token")
+        if managed:
+            managed = {k: v for k, v in managed.items() if k != "credential_digest"}
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
                 "published_hosts": service.store.get("published_hosts", []),
                 "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
                 "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
-                "cloudflare_permission_issues": list(service.store.get("cloudflare_permission_issues", {}).values()),
-                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": service.store.get("managed_business_token"), "pending": service.store.get("pending_business_token"), "error": service.store.get("token_management_error")},
+                "cloudflare_permission_issues": service.permission_issues(),
+                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "pending": service.store.get("pending_business_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")
@@ -152,29 +160,52 @@ def create_admin(service):
                 raise ValueError("已有网站时不能切换 Zone")
             if cfg["turnstile_sitekey"] != old["turnstile_sitekey"]:
                 service.store.set("owned_widget", "")
-                for site in service.sites():
+                sites = service.sites()
+                for site in sites:
                     site["policy_version"] = secrets.token_hex(8)
+                service.store.set("sites", sites)
                 # Invalidate existing visitor grants when widget credentials change.
                 service.store.set_secret("signing_key", secrets.token_urlsafe(48))
             service.store.set("settings", cfg)
             service.store.audit("settings_saved", {})
-        return {"saved": True}
+        return {"saved": True, "settings": cfg, "cloudflare_setup": service.cloudflare_setup(), "cloudflare_permission_issues": service.permission_issues()}
 
     @app.post("/api/credentials")
     async def credentials(request: Request):
         data = await body(request)
         with service.lock:
+            values = {}
+            remove_read = data.get("remove_cf_read_token", False)
+            if not isinstance(remove_read, bool):
+                raise ValueError("移除只读令牌选项格式无效")
             for k in ("cf_read_token", "cf_write_token", "turnstile_secret"):
-                value = str(data.get(k, "")).strip()
+                if not isinstance(data.get(k, ""), str):
+                    raise ValueError("令牌格式无效")
+                value = data.get(k, "").strip()
                 if value:
                     if not 10 <= len(value) <= 4096:
                         raise ValueError("令牌长度无效")
-                    service.store.set_secret(k, value)
-                    if k == "cf_write_token":
-                        service.store.set("managed_business_token", None)
-                        service.store.set("pending_business_token", None)
+                    values[k] = value
+            if remove_read:
+                if values.get("cf_read_token"):
+                    raise ValueError("不能同时填写和移除只读令牌")
+                values["cf_read_token"] = ""
+            # Validate and encrypt every value before a single atomic database commit.
+            encrypted = {k: service.store.cipher.encrypt(v.encode()).decode() for k, v in values.items()}
+            import json
+            changed = service.store.get("credential_updated_at", {})
+            changed.update({k: time.time() for k in values})
+            with service.store.lock, service.store.db:
+                for k, value in encrypted.items():
+                    service.store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (k, value))
+                service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("credential_updated_at", json.dumps(changed)))
+                if "cf_write_token" in values:
+                    for key in ("managed_business_token", "pending_business_token"):
+                        service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
             service.store.audit("credentials_updated", {})
-        return {"saved": True}
+        return {"saved": True, "cloudflare_setup": service.cloudflare_setup(),
+                "cloudflare_permission_issues": service.permission_issues(),
+                "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/sites")
     async def sites(request: Request):
