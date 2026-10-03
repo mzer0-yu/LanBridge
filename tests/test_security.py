@@ -9,6 +9,30 @@ from lanbridge.service import Service, lan_address, pinned_origin
 from lanbridge.store import password_hash, password_check
 
 
+def test_cloudflare_forbidden_names_operation_without_echoing_upstream_secrets(service, monkeypatch):
+    import httpx
+    original = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, json={"success": False, "errors": [{"code": 10000, "message": "sensitive-upstream-value"}]}))
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=transport, **kw))
+    with pytest.raises(RuntimeError) as failure:
+        service.cf.request("POST", "/accounts/" + "a" * 32 + "/cfd_tunnel", {"name": "example"})
+    text = str(failure.value)
+    assert "HTTP 403" in text and "创建 Tunnel" in text and "写入 API Token" in text
+    assert "10000" in text and "Cloudflare Tunnel Write" in text
+    assert "sensitive-upstream-value" not in text and "test-only-cloudflare-token" not in text
+    assert len(text) < 400
+
+
+def test_cloudflare_zone_error_identifies_optional_read_token(service, monkeypatch):
+    import httpx
+    service.store.set_secret("cf_read_token", "read-test-token")
+    original = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, text="not-json"))
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=transport, **kw))
+    with pytest.raises(RuntimeError, match="读取域名.*只读 API Token"):
+        service.cf.zone()
+
+
 @pytest.fixture
 def service(tmp_path):
     result = Service(tmp_path / "data")

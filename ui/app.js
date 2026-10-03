@@ -109,7 +109,7 @@ $('#settings-form').onsubmit=async e=>{e.preventDefault();try{await action(e.sub
 $('#credentials-form').onsubmit=async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));if(!Object.values(values).some(value=>String(value).trim())||(replacingWriteToken&&!String(values.cf_write_token||'').trim())){$('#credentials-feedback').textContent='请先粘贴要保存的新令牌；无需更换时点击取消更换。';if(!state.credentials.cf_write_token||replacingWriteToken)setTokenStep(2);return;}try{await action(e.submitter,'credentials','凭据已加密保存',Object.fromEntries(new FormData(e.target)));e.target.reset();replacingWriteToken=false;invalidatePlan();renderSetup();$('#credentials-feedback').textContent=state.cloudflare_setup.ready?'凭据已加密保存，现在可以添加网站。':'凭据已加密保存。'+setupMessage();}catch(err){$('#credentials-feedback').textContent=err.message}};
 $('#password-form').onsubmit=async e=>{e.preventDefault();try{await api('password',Object.fromEntries(new FormData(e.target)));e.target.reset();showAuth();toast('密码已修改，请重新登录')}catch(err){toast(err.message,true)}};
 $('#site-form').onsubmit=async e=>{e.preventDefault();const f=e.target;const data=Object.fromEntries(new FormData(f));for(const k of ['enabled','human_check','passcode_required'])data[k]=f.elements[k].checked;for(const k of ['allowed_countries','allowed_ips'])data[k]=data[k].split(/[,，\s]+/).filter(Boolean);for(const k of ['requests_per_minute','session_minutes'])data[k]=Number(data[k]);e.submitter.disabled=true;try{await api('sites',data);f.elements.passcode.value='';$('#site-dialog').close();invalidatePlan();await loadState();toast('网站与本机访问策略已保存；路由变更请到连接器页发布')}catch(err){$('#site-error').textContent=err.message}finally{e.submitter.disabled=false}};
-for(const [id,path,msg] of [['create-tunnel','cloudflare/create-tunnel','Tunnel 已就绪，连接令牌已加密保存'],['widget-create','cloudflare/turnstile','Turnstile 已同步；可继续预览并发布'],['cf-check','cloudflare/check','已获取 Cloudflare 边缘状态'],['connector-start','connector/start','已启动连接器，请通过 API 核查边缘状态'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
+for(const [id,path,msg] of [['widget-create','cloudflare/turnstile','Turnstile 已同步；可继续预览并发布'],['cf-check','cloudflare/check','已获取 Cloudflare 边缘状态'],['connector-start','connector/start','已启动连接器，请通过 API 核查边缘状态'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
 $('#preview').onclick=async e=>{invalidatePlan();try{plan=await action(e.currentTarget,'cloudflare/preview');$('#plan-json').textContent=JSON.stringify(plan,null,2);$('#plan-empty').hidden=true;$('#plan-content').hidden=false;}catch{}};
 $('#apply').onclick=async e=>{if(!plan)return;try{await action(e.currentTarget,'cloudflare/apply','路由与 DNS 写后核验通过，无需重启连接器',{revision:plan.revision});invalidatePlan()}catch{invalidatePlan()}};
 api('bootstrap').then(r=>{initialized=r.initialized;csrf=r.csrf;if(r.authenticated)openShell();else showAuth()}).catch(e=>$('#auth-error').textContent=e.message);
@@ -130,3 +130,10 @@ $('#connector-ensure').onclick=async e=>{
 $('#write-token-replace').onclick=()=>{replacingWriteToken=true;setTokenStep(2);};
 $('#write-token-cancel').onclick=()=>{const input=$('#credentials-form [name=cf_write_token]');input.value='';replacingWriteToken=false;$('#credentials-feedback').textContent='已取消更换，继续使用原令牌。';renderSetup();};
 $('#token-account-next').onclick=()=>setTokenStep(1);
+
+$('#create-tunnel').onclick=async e=>{
+  const feedback=$('#tunnel-feedback'), help=$('#tunnel-permission-help');
+  feedback.hidden=false;feedback.className='form-feedback';feedback.textContent='正在核对域名并创建 Tunnel，请稍候…';help.hidden=true;
+  try{await action(e.currentTarget,'cloudflare/create-tunnel');feedback.textContent='Tunnel 已就绪，连接令牌已加密保存。';}
+  catch(err){feedback.className='form-feedback error';feedback.textContent=err.message;help.hidden=!err.message.includes('HTTP 403');}
+};

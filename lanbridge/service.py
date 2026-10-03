@@ -53,8 +53,10 @@ class Cloudflare:
 
     def request(self, method, path, body=None):
         sensitive_read = path.endswith("/token") or "/challenges/widgets" in path
-        token = self.service.store.secret("cf_read_token" if method == "GET" and not sensitive_read else "cf_write_token")
+        credential = "cf_read_token" if method == "GET" and not sensitive_read else "cf_write_token"
+        token = self.service.store.secret(credential)
         if not token and method == "GET":
+            credential = "cf_write_token"
             token = self.service.store.secret("cf_write_token")
         if not token:
             raise ValueError("请先配置 Cloudflare API 令牌")
@@ -63,7 +65,7 @@ class Cloudflare:
                 response = client.request(method, "https://api.cloudflare.com/client/v4" + path,
                                           headers={"Authorization": "Bearer " + token}, json=body)
             if response.status_code >= 400:
-                raise RuntimeError(f"Cloudflare API HTTP {response.status_code}，请核对权限和资源 ID")
+                raise RuntimeError(self.failure_hint(method, path, response, credential))
             payload = response.json()
             if not payload.get("success"):
                 raise RuntimeError("Cloudflare API 拒绝操作，请检查账户权限和配置")
@@ -72,6 +74,32 @@ class Cloudflare:
             if isinstance(exc, ValueError) and str(exc).startswith("请"):
                 raise
             raise RuntimeError("Cloudflare API 网络连接或响应异常") from None
+
+    @staticmethod
+    def failure_hint(method, path, response, credential):
+        # Do not echo upstream messages, request bodies, headers or credentials.
+        try:
+            errors = response.json().get("errors", [])
+            codes = [str(e["code"]) for e in errors if isinstance(e, dict) and isinstance(e.get("code"), int)]
+        except (ValueError, AttributeError, TypeError):
+            codes = []
+        if "/cfd_tunnel" in path:
+            operation = "创建 Tunnel" if method == "POST" else "获取 Tunnel 连接令牌" if path.endswith("/token") else "访问 Tunnel"
+            permission = "账户 → Cloudflare Tunnel → 编辑（API 权限名 Cloudflare Tunnel Write）；账户资源需包含配置的 Account ID"
+        elif "/challenges/widgets" in path:
+            operation, permission = "访问 Turnstile", "账户 → Turnstile → 编辑，账户资源需包含配置的 Account ID"
+        elif "/dns_records" in path:
+            operation, permission = "访问 DNS", "区域 → DNS → 编辑，区域资源需包含配置的 Zone"
+        else:
+            operation, permission = "读取域名", "区域 → Zone → 读取，区域资源需包含配置的 Zone"
+        name = "只读 API Token" if credential == "cf_read_token" else "写入 API Token"
+        prefix = f"Cloudflare API HTTP {response.status_code}：{operation}失败（使用{name}"
+        prefix += ("，错误码 " + ",".join(codes[:3]) if codes else "") + "）。"
+        if response.status_code == 403:
+            return prefix + "请核对令牌权限：" + permission + "。若已授予，请检查令牌有效期及客户端 IP 限制；更新后在设置中更换令牌再重试。"
+        if response.status_code == 401:
+            return prefix + "令牌认证失败，请在设置中更换有效的 API Token。"
+        return prefix + "请核对资源 ID 和令牌资源范围后重试。"
 
     def tunnel_path(self):
         cfg = self.service.settings()
