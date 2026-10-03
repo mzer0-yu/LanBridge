@@ -1,0 +1,214 @@
+from __future__ import annotations
+from pathlib import Path
+import secrets
+import time
+
+import httpx
+from fastapi import FastAPI, Request
+from starlette.responses import FileResponse, JSONResponse
+from .gateway import Limiter
+from .models import Settings
+from .service import pinned_origin
+from .store import password_check, password_hash
+
+
+def create_admin(service):
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    limiter = Limiter()
+    ui = Path(__file__).resolve().parent.parent / "ui"
+
+    @app.middleware("http")
+    async def guard(request, call_next):
+        cfg = service.settings()
+        allowed = {f'127.0.0.1:{cfg["admin_port"]}', f'localhost:{cfg["admin_port"]}'}
+        host = request.headers.get("host", "")
+        if host not in allowed:
+            return JSONResponse({"detail": "管理台只接受本机访问"}, 403)
+        if request.client and request.client.host not in ("127.0.0.1", "::1", "testclient"):
+            return JSONResponse({"detail": "管理台仅监听本机"}, 403)
+        if request.method not in ("GET", "HEAD") and request.headers.get("origin") != "http://" + host:
+            return JSONResponse({"detail": "请求来源校验失败"}, 403)
+        public = request.url.path in ("/", "/app.js", "/style.css", "/api/bootstrap", "/api/setup", "/api/login")
+        session = service.store.session(request.cookies.get("lb_admin", ""))
+        if not public and not session:
+            return JSONResponse({"detail": "请登录管理员账户"}, 401)
+        if not public and request.method not in ("GET", "HEAD") and request.headers.get("x-csrf-token") != session["csrf"]:
+            return JSONResponse({"detail": "CSRF 校验失败，请刷新管理台"}, 403)
+        request.state.session = session
+        try:
+            response = await call_next(request)
+        except (ValueError, RuntimeError, OSError) as exc:
+            # Exceptions never include raw Cloudflare response or secret payloads.
+            detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else "本机服务操作失败，请检查路径、权限或网络"
+            if detail.startswith("{") or len(detail) > 400:
+                detail = "输入格式不正确，请检查配置"
+            response = JSONResponse({"detail": detail}, 400)
+        response.headers.update({"Cache-Control": "no-store", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin"})
+        return response
+
+    async def body(request, limit=20000):
+        raw = await request.body()
+        if len(raw) > limit:
+            raise ValueError("请求内容过大")
+        import json
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            raise ValueError("请求格式错误") from None
+        if not isinstance(value, dict):
+            raise ValueError("请求格式错误")
+        return value
+
+    @app.get("/")
+    def index():
+        return FileResponse(ui / "index.html")
+
+    @app.get("/app.js")
+    def script():
+        return FileResponse(ui / "app.js")
+
+    @app.get("/style.css")
+    def style():
+        return FileResponse(ui / "style.css")
+
+    @app.get("/api/bootstrap")
+    def bootstrap(request: Request):
+        return {"initialized": bool(service.store.get("admin")), "authenticated": bool(request.state.session),
+                "csrf": request.state.session["csrf"] if request.state.session else ""}
+
+    @app.post("/api/setup")
+    async def setup(request: Request):
+        data = await body(request)
+        with service.lock:
+            if service.store.get("admin"):
+                raise ValueError("管理员已经初始化")
+            user = str(data.get("username", "admin")).strip()
+            if not 1 <= len(user) <= 64:
+                raise ValueError("用户名长度无效")
+            service.store.set("admin", {"username": user, "password_hash": password_hash(str(data.get("password", "")))})
+            service.store.audit("admin_initialized", {})
+        return {"initialized": True}
+
+    @app.post("/api/login")
+    async def login(request: Request):
+        if not limiter.allow("admin_login", 5):
+            return JSONResponse({"detail": "登录失败次数过多，请 60 秒后重试"}, 429)
+        data = await body(request)
+        user = service.store.get("admin", {})
+        if not user or data.get("username") != user["username"] or not password_check(str(data.get("password", "")), user["password_hash"]):
+            return JSONResponse({"detail": "用户名或密码错误"}, 401)
+        token, csrf = service.store.login()
+        response = JSONResponse({"csrf": csrf})
+        response.set_cookie("lb_admin", token, httponly=True, samesite="strict", max_age=28800)
+        service.store.audit("admin_login", {})
+        return response
+
+    @app.post("/api/logout")
+    def logout(request: Request):
+        service.store.logout(request.cookies.get("lb_admin", ""))
+        response = JSONResponse({"logged_out": True})
+        response.delete_cookie("lb_admin")
+        return response
+
+    @app.post("/api/password")
+    async def change_password(request: Request):
+        data = await body(request)
+        with service.lock:
+            user = service.store.get("admin")
+            if not password_check(str(data.get("current", "")), user["password_hash"]):
+                raise ValueError("当前密码错误")
+            user["password_hash"] = password_hash(str(data.get("password", "")))
+            service.store.set("admin", user)
+            with service.store.lock, service.store.db:
+                service.store.db.execute("DELETE FROM sessions")
+            service.store.audit("admin_password_changed", {})
+        return {"login_required": True}
+
+    @app.get("/api/state")
+    def state():
+        return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+                "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
+                "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
+
+    @app.post("/api/settings")
+    async def settings(request: Request):
+        data = await body(request)
+        with service.lock:
+            old = service.settings()
+            # Ports and tunnel identity are CLI/runtime-owned; never silently change listeners.
+            for k in ("admin_port", "gateway_port", "tunnel_id"):
+                data[k] = old[k]
+            cfg = Settings(**data).model_dump()
+            if old["tunnel_id"] and any(old[k] != cfg[k] for k in ("account_id", "zone_id", "zone_name")):
+                raise ValueError("Tunnel 已绑定账户和 Zone，不能直接切换；请使用独立数据目录")
+            if service.sites() and old["zone_name"] != cfg["zone_name"]:
+                raise ValueError("已有网站时不能切换 Zone")
+            if cfg["turnstile_sitekey"] != old["turnstile_sitekey"]:
+                service.store.set("owned_widget", "")
+                for site in service.sites():
+                    site["policy_version"] = secrets.token_hex(8)
+                # Invalidate existing visitor grants when widget credentials change.
+                service.store.set_secret("signing_key", secrets.token_urlsafe(48))
+            service.store.set("settings", cfg)
+            service.store.audit("settings_saved", {})
+        return {"saved": True}
+
+    @app.post("/api/credentials")
+    async def credentials(request: Request):
+        data = await body(request)
+        with service.lock:
+            for k in ("cf_read_token", "cf_write_token", "turnstile_secret"):
+                value = str(data.get(k, "")).strip()
+                if value:
+                    if not 10 <= len(value) <= 4096:
+                        raise ValueError("令牌长度无效")
+                    service.store.set_secret(k, value)
+            service.store.audit("credentials_updated", {})
+        return {"saved": True}
+
+    @app.post("/api/sites")
+    async def sites(request: Request):
+        return service.save_site(await body(request))
+
+    @app.post("/api/sites/{site_id}/probe")
+    async def probe(site_id: str):
+        site = next((s for s in service.sites() if s["id"] == site_id), None)
+        if not site:
+            raise ValueError("网站不存在")
+        base, host, sni = pinned_origin(site, service.settings())
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False) as client:
+                response = await client.get(base + "/", headers={"Host": host}, extensions={"sni_hostname": sni})
+            result = {"http_status": response.status_code, "reachable": True, "checked_at": time.time()}
+        except httpx.HTTPError:
+            result = {"reachable": False, "checked_at": time.time()}
+        service.store.set("probe_" + site_id, result)
+        return result
+
+    @app.post("/api/cloudflare/{action}")
+    async def cloudflare(action: str, request: Request):
+        import asyncio
+        data = await body(request)
+        if action == "create-tunnel":
+            return await asyncio.to_thread(service.cf.create_tunnel)
+        if action == "turnstile":
+            return await asyncio.to_thread(service.cf.create_widget)
+        if action == "preview":
+            return await asyncio.to_thread(service.cf.plan)
+        if action == "apply":
+            return await asyncio.to_thread(service.cf.apply, data.get("revision", ""))
+        if action == "check":
+            result = await asyncio.to_thread(service.cf.status)
+            service.store.set("cloudflare_status", result)
+            return result
+        raise ValueError("操作不存在")
+
+    @app.post("/api/connector/{action}")
+    def connector(action: str):
+        if action == "start":
+            return service.connector.start()
+        if action == "stop":
+            return service.connector.stop()
+        raise ValueError("操作不存在")
+
+    return app

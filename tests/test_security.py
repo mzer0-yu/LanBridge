@@ -1,0 +1,158 @@
+import json
+from pathlib import Path
+import secrets
+import pytest
+from fastapi.testclient import TestClient
+from lanbridge.admin import create_admin
+from lanbridge.gateway import create_gateway, signed_pass, valid_pass, PASS_COOKIE
+from lanbridge.service import Service, lan_address, pinned_origin
+from lanbridge.store import password_hash, password_check
+
+
+@pytest.fixture
+def service(tmp_path):
+    result = Service(tmp_path / "data")
+    cfg = result.settings()
+    cfg.update(zone_name="example.com", zone_id="b" * 32, account_id="a" * 32)
+    result.store.set("settings", cfg)
+    result.store.set_secret("cf_write_token", "test-only-cloudflare-token")
+    yield result
+    result.store.db.close()
+
+
+def add_site(service, **kwargs):
+    return service.save_site(dict(name="LAN app", hostname="app.example.com", origin="http://127.0.0.1:9300", human_check=True, **kwargs))
+
+
+@pytest.mark.parametrize("missing", ["account_id", "zone_id", "zone_name", "cf_write_token"])
+def test_new_site_requires_cloudflare_setup_without_side_effects(service, missing):
+    if missing == "cf_write_token":
+        service.store.set_secret(missing, "")
+    else:
+        cfg = service.settings()
+        cfg[missing] = ""
+        service.store.set("settings", cfg)
+    assert service.cloudflare_setup()["ready"] is False
+    before = service.store.audit_list()
+    with pytest.raises(ValueError, match="Cloudflare 尚未配置完整"):
+        add_site(service, passcode_required=True, passcode="long visitor password")
+    assert service.sites() == []
+    assert service.store.audit_list() == before
+    assert not any(r[0].startswith("passcode_") for r in service.store.db.execute("SELECT key FROM secrets"))
+
+
+def test_missing_credentials_do_not_prevent_disabling_existing_site(service):
+    site = add_site(service)
+    service.store.set_secret("cf_write_token", "")
+    assert service.save_site(site | {"enabled": False})["enabled"] is False
+
+
+def test_encrypted_secrets_and_password_hash(service):
+    token = "sensitive-token-" + secrets.token_hex(12)
+    service.store.set_secret("cf_write_token", token)
+    assert service.store.secret("cf_write_token") == token
+    rows = service.store.db.execute("SELECT value FROM secrets").fetchall()
+    assert all(token not in row[0] for row in rows)
+    hashed = password_hash("correct horse battery")
+    assert password_check("correct horse battery", hashed)
+    assert not password_check("wrong", hashed)
+    assert "correct horse" not in hashed
+
+
+def test_admin_host_origin_auth_and_csrf(service):
+    client = TestClient(create_admin(service), base_url="http://127.0.0.1:8890")
+    assert client.get("/api/state").status_code == 401
+    assert client.post("/api/setup", json={"password": "safe long password"}).status_code == 403
+    assert client.get("/", headers={"Host": "evil.example"}).status_code == 403
+    headers = {"Origin": "http://127.0.0.1:8890"}
+    assert client.post("/api/setup", json={"username": "admin", "password": "safe long password"}, headers=headers).status_code == 200
+    assert client.post("/api/setup", json={"username": "other", "password": "safe long password"}, headers=headers).status_code == 400
+    result = client.post("/api/login", json={"username": "admin", "password": "safe long password"}, headers=headers)
+    assert result.status_code == 200
+    assert client.post("/api/settings", json=service.settings(), headers=headers).status_code == 403
+    headers["X-CSRF-Token"] = result.json()["csrf"]
+    secret = "private-token-test-12345"
+    assert client.post("/api/credentials", json={"cf_write_token": secret}, headers=headers).status_code == 200
+    state = client.get("/api/state")
+    assert secret not in state.text
+    assert state.json()["credentials"]["cf_write_token"]
+    assert client.post("/api/logout", json={}, headers=headers).status_code == 200
+    assert client.get("/api/state").status_code == 401
+
+
+def test_session_bound_to_host_ip_policy(service):
+    site = add_site(service)
+    token = signed_pass(service, site, "203.0.113.4")
+    assert valid_pass(service, site, "203.0.113.4", token)
+    assert not valid_pass(service, site, "203.0.113.5", token)
+    assert not valid_pass(service, site | {"hostname": "other.example.com"}, "203.0.113.4", token)
+    assert not valid_pass(service, site | {"policy_version": "new"}, "203.0.113.4", token)
+    assert not valid_pass(service, site, "203.0.113.4", token + "x")
+
+
+def test_unconfigured_turnstile_and_api_cannot_bypass(service):
+    add_site(service)
+    client = TestClient(create_gateway(service), base_url="https://app.example.com")
+    assert client.get("/", headers={"Accept": "text/html"}).status_code == 503
+    assert client.get("/api/private").status_code == 401
+    assert client.post("/write", json={}).status_code == 401
+    assert client.get("/", headers={"Host": "unknown.example.com"}).status_code == 404
+    assert client.post("/.lanbridge/verify", json={"token": "fake"}, headers={"Origin": "https://app.example.com"}).status_code == 403
+    with pytest.raises(Exception):
+        with client.websocket_connect("/socket"):
+            pass
+
+
+def test_country_ip_and_gateway_reserved_port(service):
+    site = add_site(service, allowed_countries=["CN"], allowed_ips=["203.0.113.0/24"])
+    client = TestClient(create_gateway(service), base_url="https://app.example.com")
+    # Non-connector peers cannot assert trusted Cloudflare headers.
+    assert client.get("/", headers={"Accept": "text/html", "CF-IPCountry": "CN", "CF-Connecting-IP": "203.0.113.1"}).status_code == 403
+    for host in ("169.254.169.254", "8.8.8.8", "0.0.0.0", "224.0.0.1"):
+        with pytest.raises(ValueError):
+            lan_address(host)
+    for port in (8890, 8891):
+        with pytest.raises(ValueError):
+            pinned_origin(site | {"origin": f"http://127.0.0.1:{port}"}, service.settings())
+
+
+def test_turnstile_validates_hostname_action_and_passcode(service, monkeypatch):
+    site = add_site(service, passcode_required=True, passcode="safe visitor password")
+    service.store.set_secret("turnstile_secret", "private-turnstile-secret")
+    cfg = service.settings()
+    cfg["turnstile_sitekey"] = "public-key"
+    service.store.set("settings", cfg)
+    result = {"success": True, "hostname": "wrong.example.com", "action": "lanbridge"}
+    calls = []
+    class FakeResponse:
+        status_code = 200
+        def json(self): return result
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, data):
+            calls.append(data)
+            return FakeResponse()
+    monkeypatch.setattr("lanbridge.gateway.httpx.AsyncClient", FakeClient)
+    client = TestClient(create_gateway(service), base_url="https://app.example.com")
+    headers = {"Origin": "https://app.example.com"}
+    body = {"token": "test-token", "passcode": "safe visitor password"}
+    assert client.post("/.lanbridge/verify", json=body, headers=headers).status_code == 403
+    result["hostname"] = "app.example.com"
+    result["action"] = "wrong-action"
+    assert client.post("/.lanbridge/verify", json=body, headers=headers).status_code == 403
+    result["action"] = "lanbridge"
+    response = client.post("/.lanbridge/verify", json=body, headers=headers)
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"] and "HttpOnly" in response.headers["set-cookie"]
+    assert calls[-1]["secret"] == "private-turnstile-secret"
+    assert valid_pass(service, site, "testclient", client.cookies.get(PASS_COOKIE))
+
+
+def test_rate_limit_applies_even_with_visitor_cookie(service):
+    site = add_site(service, requests_per_minute=10)
+    client = TestClient(create_gateway(service), base_url="https://app.example.com")
+    for _ in range(10):
+        assert client.get("/api/private").status_code == 401
+    assert client.get("/api/private").status_code == 429
