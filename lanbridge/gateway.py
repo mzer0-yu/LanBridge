@@ -84,6 +84,21 @@ def find_site(service, request):
     return next((s for s in service.sites() if s["enabled"] and s["hostname"] == host), None)
 
 
+def public_scheme(request):
+    peer = request.client.host if request.client else ""
+    if peer in ("127.0.0.1", "::1"):
+        try:
+            scheme = json.loads(request.headers.get("cf-visitor", "{}" )).get("scheme")
+        except (ValueError, AttributeError):
+            scheme = None
+        if scheme in ("http", "https"):
+            return scheme
+        scheme = request.headers.get("x-forwarded-proto", "")
+        if scheme in ("http", "https"):
+            return scheme
+    return request.url.scheme
+
+
 def denied_policy(site, ip, country):
     if site["allowed_countries"] and country not in site["allowed_countries"]:
         return True
@@ -107,13 +122,36 @@ def gate_page(service, site):
     if site["human_check"] and (not key or not service.store.secret("turnstile_secret")):
         return HTMLResponse("人类验证尚未配置，访问暂时关闭。", 503)
     title = html.escape(site["name"])
-    widget = f'<div class="cf-turnstile" data-sitekey="{html.escape(key, quote=True)}" data-action="lanbridge"></div>' if site["human_check"] else ""
+    widget = f'<div class="cf-turnstile" data-sitekey="{html.escape(key, quote=True)}" data-action="lanbridge" data-callback="onHumanVerified" data-expired-callback="onHumanExpired"></div>' if site["human_check"] else ""
     password = '<label>访问口令<input id="passcode" type="password" autocomplete="current-password" required maxlength="256"></label>' if site["passcode_required"] else ""
+    automatic = site["human_check"] and not site["passcode_required"]
+    button = '<button id="continue" hidden>重试验证</button>' if automatic else '<button id="continue">验证并继续</button>'
+    description = "完成人类验证后将自动进入网站。" if automatic else "完成验证并输入访问口令后，继续访问该网站。"
     page = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>访问验证</title>
 <style>body{background:#f3f5f7;font:15px system-ui;color:#233347;margin:0;display:grid;place-items:center;min-height:100vh}.card{background:white;border:1px solid #dce2e9;border-radius:18px;padding:36px;width:min(340px,80vw)}h1{font-size:25px}p{color:#63758b;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:1px solid #ccd5df;margin:10px 0}button{background:#1c6657;color:white;cursor:pointer}.cf-turnstile{margin:16px 0}#error{color:#ad3b3b}</style>
-<div class="card"><small>LANBRIDGE · 安全访问</small><h1>''' + title + '''</h1><p>完成验证后，继续访问该网站。</p><form id="verify">''' + password + widget + '''<button>验证并继续</button></form><p id="error"></p></div>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<script>document.querySelector('#verify').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const r=await fetch('/.lanbridge/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.querySelector('[name="cf-turnstile-response"]')?.value||'',passcode:document.querySelector('#passcode')?.value||''})});if(!r.ok){const d=await r.json();throw Error(d.detail||'验证失败')}location.reload()}catch(err){document.querySelector('#error').textContent=err.message;if(window.turnstile)turnstile.reset()}finally{b.disabled=false}};</script></html>'''
+<div class="card"><small>LANBRIDGE · 安全访问</small><h1>''' + title + '''</h1><p>''' + description + '''</p><form id="verify">''' + password + widget + button + '''</form><p id="verify-status" role="status"></p><p id="error" role="alert"></p></div>
+<script>
+const form=document.querySelector('#verify'),button=document.querySelector('#continue'),message=document.querySelector('#verify-status'),error=document.querySelector('#error');
+const automatic=!document.querySelector('#passcode');
+let humanToken='',submitting=false;
+async function submitVerification(){
+  if(submitting||!form.reportValidity())return;
+  submitting=true;button.disabled=true;error.textContent='';message.textContent='正在确认验证结果…';
+  try{
+    const r=await fetch('/.lanbridge/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:humanToken||document.querySelector('[name="cf-turnstile-response"]')?.value||'',passcode:document.querySelector('#passcode')?.value||''})});
+    if(!r.ok){const d=await r.json();throw Error(d.detail||'验证失败')}
+    message.textContent='验证通过，正在进入网站…';location.reload();
+  }catch(err){
+    error.textContent=err.message;message.textContent='';humanToken='';
+    button.hidden=false;
+    if(window.turnstile)window.turnstile.reset();
+  }finally{submitting=false;button.disabled=false}
+}
+window.onHumanVerified=token=>{humanToken=token;if(automatic)submitVerification();else message.textContent='人类验证已通过，请输入口令并继续。'};
+window.onHumanExpired=()=>{humanToken='';message.textContent='验证已过期，请重新验证。'};
+form.onsubmit=e=>{e.preventDefault();submitVerification()};
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></html>'''
     return HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
 
 
@@ -126,6 +164,8 @@ def create_gateway(service):
         site = find_site(service, request)
         if not site:
             return Response("Not found", 404)
+        if public_scheme(request) == "http":
+            return RedirectResponse(str(request.url.replace(scheme="https", netloc=site["hostname"])), status_code=308)
         ip, country = visitor(request)
         request.state.site, request.state.ip = site, ip
         if denied_policy(site, ip, country):
