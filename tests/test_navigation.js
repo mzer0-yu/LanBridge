@@ -19,9 +19,20 @@ test('missing account configuration belongs only to settings; empty unused featu
   const state=ready();state.settings.tunnel_id='';state.connector.running=false;state.credentials.tunnel_token=false;state.cloudflare_setup={ready:false,missing:['API Token']};
   const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);
 });
-test('permission failure does not spread to mapping, security or history tabs',()=>{
+test('permission failure does not spread to website management or history tabs',()=>{
   const state=ready();state.cloudflare_permission_issues=[{detail:'Cloudflare API HTTP 403：创建 Tunnel失败'}];
   const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);
+});
+
+test('website publication status distinguishes pending publication, removal and verification',()=>{
+  const context={};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function publicationStatus('),source.indexOf('function table(')),context);
+  const site={hostname:'app.example.com',enabled:true},current={published_hosts:[]};
+  assert.equal(context.publicationStatus(site,current).label,'待发布');
+  current.published_hosts=[site.hostname];assert.equal(context.publicationStatus(site,current).label,'已发布');
+  current.publication_needs_review=true;assert.equal(context.publicationStatus(site,current).label,'待核验');
+  site.enabled=false;assert.equal(context.publicationStatus(site,current).label,'待停用');
+  current.published_hosts=[];assert.equal(context.publicationStatus(site,current).label,'已停用');
 });
 test('route changes and incomplete publication belong only to connector',()=>{
   const state=ready();state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:false}];state.publication_needs_review=true;
@@ -34,7 +45,7 @@ test('source warning is tied to the checked origin; changed or disabled sites re
 });
 test('only published enabled human-check sites report missing Turnstile credentials',()=>{
   const state=ready();state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:true}];state.published_hosts=['app.example.com'];state.credentials.turnstile_secret=false;
-  const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['security']);state.credentials.turnstile_secret=true;assert.deepEqual(Array.from(marked(context)),[]);
+  const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);state.credentials.turnstile_secret=true;assert.deepEqual(Array.from(marked(context)),[]);
 });
 test('connector badge resets after recovery and view changes; overview summary has no pending badge',()=>{
   const state=ready();state.publication_needs_review=true;
@@ -48,7 +59,7 @@ test('settings is the last list item without bottom anchoring',()=>{
 
 test('unpublished default human-check option is preparation, not a security failure',()=>{
   const state=ready();state.settings.tunnel_id='';state.settings.turnstile_sitekey='';state.credentials.turnstile_secret=false;state.credentials.tunnel_token=false;state.connector.running=false;state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:true}];
-  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#security-nav-status'].hidden,true);assert.deepEqual(Array.from(marked(context)),['connector']);
+  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.deepEqual(Array.from(marked(context)),['connector']);
 });
 
 test('a replaced credential is awaiting verification instead of a current permission failure',()=>{
@@ -167,7 +178,7 @@ test('setup only offers adding the first website when none exists',()=>{
 });
 test('existing websites lead to the remaining verification or publishing step',()=>{
   const state=ready();state.sites=[{enabled:true,hostname:'app.example.com',human_check:true}];state.settings.turnstile_sitekey='';
-  assert.equal(progressHarness(state).next,'security');
+  assert.equal(progressHarness(state).next,'verification');
   state.settings.turnstile_sitekey='key';assert.equal(progressHarness(state).label,'发布网站映射 →');
   state.published_hosts=['app.example.com'];assert.equal(progressHarness(state).next,'sites');
   state.connector.running=false;assert.equal(progressHarness(state).label,'完成连接器配置 →');

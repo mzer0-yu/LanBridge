@@ -67,3 +67,6 @@ nav button{transition:background-color .15s,color .15s;filter:none}nav button:ho
 .security-tools{gap:24px;align-items:center}.verification-summary{min-width:0;flex:1}.verification-summary h2{display:flex;align-items:center;gap:12px}.verification-summary p{margin:10px 0 0;overflow-wrap:anywhere}.security-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}.security-grid>.panel:only-child .policy-list{grid-template-columns:repeat(3,minmax(0,1fr))}.security-grid .policy-list{gap:20px 28px}.security-grid .panel-heading{margin-bottom:24px}.security-grid .policy-list b{overflow-wrap:anywhere}
 @media(max-width:760px){.security-tools{align-items:flex-start;flex-wrap:wrap}.security-tools>button{align-self:flex-start}.security-grid>.panel:only-child .policy-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:460px){.security-grid>.panel:only-child .policy-list{grid-template-columns:1fr}}
+
+#human-verification-panel{margin-bottom:22px}.site-edit-section{border-top:1px solid var(--line);padding-top:18px;margin-top:18px}.site-edit-section h3{margin-bottom:16px;font-size:16px}
+.dialog-heading+input+.site-edit-section{border-top:0;margin-top:0}
