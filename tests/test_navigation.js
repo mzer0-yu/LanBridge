@@ -5,6 +5,18 @@ const vm=require('node:vm');
 const path=require('node:path');
 const root=path.join(__dirname,'..');
 const source=fs.readFileSync(path.join(root,'ui/app.js'),'utf8');
+test('protocol form handles independent choices and legacy site defaults',()=>{
+  const context={};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function selectedProtocols('),source.indexOf('function editSite(')),context);
+  const form={elements:{protocol_http:{checked:false},protocol_websocket:{checked:true}}};
+  assert.deepEqual(Array.from(context.selectedProtocols(form)),['websocket']);
+  form.elements.protocol_http.checked=true;assert.deepEqual(Array.from(context.selectedProtocols(form)),['http','websocket']);
+  form.elements.protocol_http.checked=false;form.elements.protocol_websocket.checked=false;
+  assert.deepEqual(Array.from(context.selectedProtocols(form)),[]);
+  const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+  assert(html.includes('name="protocol_http"'));assert(html.includes('name="protocol_websocket"'));
+  assert(source.includes("site?.protocols||['http','websocket']"));
+});
 function harness(state){
   const nodes={};
   const context={state,currentView:'overview',esc:value=>String(value).replaceAll('<','&lt;'),$:selector=>nodes[selector]||=({dataset:{}})};

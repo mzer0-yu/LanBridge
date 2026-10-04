@@ -123,6 +123,15 @@ def test_websocket_proxy_requires_grant_and_relays(service):
             assert ws.receive_text() == "hello"
             ws.send_bytes(b"\x00\xff")
             assert ws.receive_bytes() == b"\x00\xff"
+        site = service.save_site(site | {"protocols": ["http"]})
+        with pytest.raises(Exception):
+            with client.websocket_connect("wss://app.example.com/ws"):
+                pass
+        site = service.save_site(site | {"protocols": ["websocket"]})
+        client.cookies.set(PASS_COOKIE, signed_pass(service, site, "testclient"))
+        with client.websocket_connect("wss://app.example.com/ws") as ws:
+            ws.send_text("socket-only")
+            assert ws.receive_text() == "socket-only"
     finally:
         done.set()
         thread.join(timeout=5)

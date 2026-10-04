@@ -2,6 +2,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from urllib.parse import urlsplit
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -12,6 +13,7 @@ class Site(BaseModel):
     origin: str
     enabled: bool = True
     paused: bool = False
+    protocols: list[Literal["http", "websocket"]] = Field(default_factory=lambda: ["http", "websocket"], min_length=1)
     human_check: bool = True
     passcode_required: bool = False
     allowed_countries: list[str] = Field(default_factory=list)

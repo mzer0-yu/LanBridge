@@ -249,6 +249,8 @@ def create_gateway(service):
             if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
                 return gate_page(service, site)
             return JSONResponse({"detail": "需要先在浏览器中完成访问验证", "verification_required": True}, 401, headers={"Cache-Control": "no-store"})
+        if "http" not in site.get("protocols", ["http", "websocket"]):
+            return Response("此网站未启用 HTTP 转发", 403, headers={"Cache-Control": "no-store"})
         return None
 
     @app.post(PREFIX + "/verify")
@@ -404,7 +406,7 @@ def create_gateway(service):
     async def websocket_proxy(ws: WebSocket, path: str):
         site = find_site(service, ws)
         ip, country = visitor(ws)
-        if not site or site.get("paused") or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
+        if not site or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
             await ws.close(code=1008)
             return
         if not limiter.allow((site["id"], ip, "request"), site["requests_per_minute"]):
