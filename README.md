@@ -177,7 +177,7 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 
 授权和刷新凭据通过 Windows DPAPI 加密保存。每次 API 操作前检查有效期，接近到期时通过官方 CLI 自动刷新。刷新使用独立的受保护临时目录，结束删除临时文件；不影响用户其他 CLI 登录，不保存账户密码，秘密不返回管理页面或日志。撤销授权、资源权限变化或网络异常可能需要重新授权。
 
-Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。官方本机回调等待约 2 分钟；超时需要重新发起，旧回调地址无法继续。授权期间修改账户、域名或凭据会停止本次配置。
+Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。官方本机回调等待约 2 分钟，但无需等到超时：等待期间可点击“取消授权”立即结束请求，或“重新打开授权页”结束旧请求并发起新授权。旧页面随即失效；取消保留原凭据。API 对应 `POST /api/cloudflare/browser-authorize-cancel` 和 `POST /api/cloudflare/browser-authorize-restart`，同样要求管理员会话、Origin 和 CSRF。授权期间修改账户、域名或凭据会停止本次配置。
 
 此 OAuth 范围不包含 Turnstile。人类验证可单独配置 Site Key 和 Secret Key，或使用高级用户令牌管理流程。手动更换写入令牌会清除本机 OAuth 凭据，切回令牌模式。
 

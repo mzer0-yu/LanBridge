@@ -186,3 +186,54 @@ def test_manual_token_replacement_clears_oauth_and_never_returns_secrets(browser
     assert not browser.service.store.secret("cf_oauth_profile")
     assert browser.service.store.get("managed_business_token") is None
     assert browser.service.store.secret("cf_write_token")=="manual-replacement-secret"
+
+
+def test_cancel_stops_real_waiting_process_and_restart_needs_no_timeout(browser,monkeypatch):
+    import sys
+    monkeypatch.setattr(browser,"command",lambda:[sys.executable,"-c","import time; time.sleep(120)"])
+    browser.start()
+    deadline=time.monotonic()+5
+    while browser.process is None and time.monotonic()<deadline:time.sleep(.01)
+    assert browser.process is not None
+    process=browser.process
+    before=time.monotonic()
+    result=browser.cancel()
+    assert time.monotonic()-before<4
+    assert result["phase"]=="cancelled" and process.poll() is not None
+    assert not browser.thread.is_alive()
+    assert browser.service.store.secret("cf_write_token")=="old-business-secret"
+    assert not list((browser.service.store.root/"browser-auth").iterdir())
+    monkeypatch.setattr(browser,"command",lambda:["node","official-cf"])
+    fake_login(browser,monkeypatch)
+    browser.restart();browser.thread.join(timeout=5)
+    assert browser.status()["phase"]=="done"
+
+
+def test_cancel_during_preparation_or_verification_does_not_interrupt_commit(browser):
+    for phase in ("preparing","creating"):
+        browser.update(phase,"正在处理")
+        with pytest.raises(ValueError,match="稍候"):browser.cancel()
+        assert not browser.cancelled.is_set()
+
+
+@pytest.mark.parametrize("endpoint",["browser-authorize-cancel","browser-authorize-restart"])
+def test_recovery_endpoints_require_admin_and_csrf(browser,monkeypatch,endpoint):
+    from fastapi.testclient import TestClient
+    from lanbridge.admin import create_admin
+    from lanbridge.store import password_hash
+    browser.service.store.set("admin",{"username":"admin","password_hash":password_hash("correct horse battery")})
+    calls=[]
+    method="cancel" if endpoint.endswith("cancel") else "restart"
+    monkeypatch.setattr(BrowserAuth,method,lambda self:calls.append(True) or {"phase":"cancelled"})
+    client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
+    assert client.post("/api/cloudflare/"+endpoint,json={}).status_code==401
+    login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
+    assert client.post("/api/cloudflare/"+endpoint,json={}).status_code==403
+    assert client.post("/api/cloudflare/"+endpoint,json={},headers={"X-CSRF-Token":login.json()["csrf"]}).status_code==200
+    assert calls==[True]
+
+
+def test_interrupted_cancellation_is_recoverable_after_service_restart(browser):
+    browser.service.store.set("browser_auth_job",{"phase":"cancelling"})
+    recovered=BrowserAuth(browser.service)
+    assert recovered.status()["phase"]=="error"

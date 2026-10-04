@@ -27,7 +27,7 @@ class BrowserAuth:
         self.gate = threading.Lock()
         self.cancelled = threading.Event()
         previous = service.store.get("browser_auth_job", {})
-        if previous.get("phase") in ("preparing", "authorizing", "creating"):
+        if previous.get("phase") in ("preparing", "authorizing", "creating", "cancelling"):
             self.update("error", "上次浏览器授权被服务重启中断。若已有创建结果未知记录，请先在 Cloudflare 核对。")
         elif previous.get("next_action") == "token_authority":
             self.update("error", "旧流程在令牌转授阶段失败。现在直接使用浏览器授权，请重新授权一次完成接入，无需另行提供授权令牌。", next_action="reauthorize")
@@ -82,6 +82,8 @@ class BrowserAuth:
         self.process = subprocess.Popen(command + args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
+            if self.cancelled.is_set():
+                self.process.kill()
             out, err = self.process.communicate(timeout=timeout)
             if self.process.returncode or self.cancelled.is_set():
                 if args[:2] == ["auth", "create"] and not self.cancelled.is_set():
@@ -125,6 +127,32 @@ class BrowserAuth:
             self.thread.start()
             return self.status()
 
+    def cancel(self):
+        with self.gate:
+            phase = self.status().get("phase")
+            if phase != "authorizing":
+                if phase in ("idle", "done", "error", "cancelled"):
+                    return self.status()
+                raise ValueError("当前正在准备或核验授权，请稍候；浏览器等待阶段可以立即取消。")
+            self.cancelled.set()
+            self.update("cancelling", "正在结束本次授权并释放本机回调端口…")
+            process = self.process
+            if process and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            if self.thread and self.thread is not threading.current_thread():
+                self.thread.join(timeout=3)
+            if not self.thread or not self.thread.is_alive():
+                self.update("cancelled", "已取消本次授权，原凭据保持不变。现在可以立即重新授权，无需等待超时。")
+            return self.status()
+
+    def restart(self):
+        if self.status().get("phase") == "authorizing":
+            self.cancel()
+        return self.start()
+
     def stop(self):
         self.cancelled.set()
         process = self.process
@@ -144,7 +172,7 @@ class BrowserAuth:
                 env = self.environment(directory, cfg["account_id"])
                 scopes = SCOPES
                 try:
-                    self.update("authorizing", "已请求打开系统浏览器。官方回调等待约 2 分钟；请确认权限并完成授权。超时后需重新发起，旧回调地址无法继续。")
+                    self.update("authorizing", "已请求打开系统浏览器。请在浏览器确认权限。误关页面可点击“重新打开授权页”，或随时取消；无需等待超时。")
                     self.run(command, env, directory, ["auth", "create", "lanbridge", "--no-device", "--scopes", *scopes], timeout=180)
                     self.update("creating", "授权已完成，正在核对权限和域名归属…")
                     identity = self.payload(self.run(command, env, directory, ["auth", "whoami", "--profile", "lanbridge"]))
@@ -179,7 +207,10 @@ class BrowserAuth:
             message = str(exc) if isinstance(exc, ValueError) else "浏览器授权失败，请检查 Node.js、官方 CLI 安装和网络后重试。"
             if store.get("pending_browser_token"):
                 message += " 创建结果未知：请在 Cloudflare 账户 API Tokens 核对 " + store.get("pending_browser_token")["name"] + "。"
-            self.update("error", message, **diagnostics)
+            if self.cancelled.is_set():
+                self.update("cancelled", "已取消本次授权，原凭据保持不变。现在可以立即重新授权，无需等待超时。")
+            else:
+                self.update("error", message, **diagnostics)
 
     @staticmethod
     def read_profile(directory):

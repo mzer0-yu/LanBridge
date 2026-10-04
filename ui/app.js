@@ -177,20 +177,30 @@ let browserAuthPoll;
 function browserAuthMessage(job){
   if(job.phase!=='authorizing'||!Number.isFinite(job.updated_at))return job.message;
   const seconds=Math.max(0,Math.ceil(120-(Date.now()/1000-job.updated_at)));
-  return job.message+(seconds>0?' 预计剩余约 '+seconds+' 秒。':' 等待已接近时限，正在确认授权结果；若浏览器回调连接失败，请等待本次任务结束后重新发起。');
+  return job.message+(seconds>0?' 预计剩余约 '+seconds+' 秒。':' 等待已接近时限，正在确认授权结果；误关浏览器或回调连接失败时，可立即重新打开授权页或取消。');
 }
 function renderBrowserAuth(){
-  const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
+  const job=state.browser_auth||{phase:"idle",message:"在浏览器授权后自动接入 Cloudflare。"},active=["preparing","authorizing","creating","cancelling"].includes(job.phase);
   $("#browser-auth-status").textContent=browserAuthMessage(job);
   $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
   for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
     button.disabled=active||!!button.dataset.busy||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;
-    button.title=active?'浏览器授权正在进行':state.token_management?.pending?'先前创建结果未知，请先核对':!tokenTemplateURL(state.settings)||!state.settings.zone_name?'请先保存账户和域名配置':'授权后创建新令牌并切换本机凭据，保留 Cloudflare 中的旧令牌';
+    button.title=active?'浏览器授权正在进行':state.token_management?.pending?'先前创建结果未知，请先核对':!tokenTemplateURL(state.settings)||!state.settings.zone_name?'请先保存账户和域名配置':'授权后自动接入并刷新凭据';
   }
+  const controls=[$('#browser-authorize-restart'),$('#browser-authorize-cancel')];
+  const recoveryBusy=controls.some(button=>!!button.dataset.busy);
+  for(const button of controls){button.hidden=job.phase!=='authorizing'&&job.phase!=='cancelling';button.disabled=job.phase!=='authorizing'||recoveryBusy;}
   if(active&&!browserAuthPoll)browserAuthPoll=setInterval(()=>{if(state)loadState().catch(()=>{});else{clearInterval(browserAuthPoll);browserAuthPoll=null;}},2000);
   if(!active&&browserAuthPoll){clearInterval(browserAuthPoll);browserAuthPoll=null;}
 }
 $("#browser-authorize").onclick=e=>startBrowserAuthorization(e.currentTarget);
+async function recoverBrowserAuthorization(button,operation){
+  if(button.dataset.busy||[$('#browser-authorize-restart'),$('#browser-authorize-cancel')].some(control=>!!control.dataset.busy))return;
+  try{await action(button,'cloudflare/browser-authorize-'+operation,null,{});}
+  catch(err){$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+}
+$('#browser-authorize-restart').onclick=e=>recoverBrowserAuthorization(e.currentTarget,'restart');
+$('#browser-authorize-cancel').onclick=e=>recoverBrowserAuthorization(e.currentTarget,'cancel');
 function renderTokenManager(){
   renderBrowserAuth();
   const management=state.token_management||{},cfg=state.settings;

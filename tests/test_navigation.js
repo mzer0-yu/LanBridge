@@ -129,7 +129,7 @@ test('authorization progress shows the wait limit and expired callback recovery'
   const context={Date:{now:()=>1000000},Number,Math};vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function browserAuthMessage('),source.indexOf('function renderBrowserAuth(')),context);
   assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:940,message:'授权中'}),/60 秒/);
-  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新发起/);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/立即重新打开授权页或取消/);
   assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
 });
 
@@ -138,4 +138,16 @@ test('browser connection has no mandatory authority-token fallback',()=>{
   assert(!html.includes('id="browser-auth-fallback"'));
   assert(!source.includes("$('#browser-auth-fallback')"));
   assert(html.includes('自动刷新凭据'));
+});
+
+
+test('closed browser can restart or cancel without waiting for expiry',()=>{
+  const nodes={};const context={state:{browser_auth:{phase:'authorizing',message:'等待确认',updated_at:Date.now()/1000},settings:{}},$:selector=>nodes[selector]||=({dataset:{}}),document:{querySelectorAll:()=>[]},Number,Math,Date,setInterval:()=>1,clearInterval(){}};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('let browserAuthPoll;'),source.indexOf('$("#browser-authorize").onclick')),context);
+  context.renderBrowserAuth();
+  for(const id of ['restart','cancel']){assert.equal(nodes['#browser-authorize-'+id].hidden,false);assert.equal(nodes['#browser-authorize-'+id].disabled,false);}
+  nodes['#browser-authorize-cancel'].dataset.busy='1';context.renderBrowserAuth();assert.equal(nodes['#browser-authorize-restart'].disabled,true);
+  nodes['#browser-authorize-cancel'].dataset.busy='';context.state.browser_auth.phase='cancelling';context.renderBrowserAuth();assert.equal(nodes['#browser-authorize-restart'].disabled,true);
+  context.state.browser_auth.phase='cancelled';context.renderBrowserAuth();assert.equal(nodes['#browser-authorize-restart'].hidden,true);
 });
