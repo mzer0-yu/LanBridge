@@ -70,6 +70,19 @@ function locateSetup(key){
   input.scrollIntoView({behavior:'smooth',block:'center'});
   input.focus({preventScroll:true});
 }
+function setupProgress(current){
+  const count=current.sites.length,title=count?'已登记 '+count+' 个网站':'必填配置已保存';
+  if(!count)return {title,detail:'添加第一个网站，填写公网域名和局域网地址。',label:'添加网站 →',next:'add'};
+  const enabled=current.sites.filter(site=>site.enabled),cfg=current.settings;
+  if(!enabled.length)return {title,detail:'现有网站均未启用，可在网站映射中调整。',label:'管理网站 →',next:'sites'};
+  if(!cfg.tunnel_id)return {title,detail:'网站已登记，下一步创建 Tunnel，再发布网站映射。',label:'创建 Tunnel →',next:'connector'};
+  if(enabled.some(site=>site.human_check)&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))return {title,detail:'现有网站启用了人类验证，请先完成 Turnstile 密钥配置。',label:'配置人类验证 →',next:'security'};
+  const desired=enabled.map(site=>site.hostname).sort(),published=[...(current.published_hosts||[])].sort();
+  if(current.publication_needs_review||JSON.stringify(desired)!==JSON.stringify(published))return {title,detail:'网站映射尚需发布或核对，请在连接器中预览并应用配置。',label:'发布网站映射 →',next:'connector'};
+  const connector=connectorReadiness(current);
+  if(connector.attention)return {title,detail:connector.detail,label:'完成连接器配置 →',next:'connector'};
+  return {title,detail:'网站映射已登记并发布。可管理现有网站，或在连接器中核查公网连接。',label:'管理网站 →',next:'sites'};
+}
 function renderSetup(){
   renderTokenTemplate();
   renderCredentialsGuide();
@@ -86,9 +99,13 @@ function renderSetup(){
   $('#setup-next').textContent=missing[0]?'去配置'+missing[0].label+' →':'配置已完成';
   $('#setup-next').dataset.setup=missing[0]?.key||'';
   $('#step-settings').textContent=ready?'✓':'1';
-  $('#setup-progress').textContent=ready?'必填配置已保存，可以管理网站。':`准备添加网站 · ${setupFields.length-missing.length}/4 项已保存`;
-  $('#setup-progress-detail').textContent=ready?'下一步：登记公网域名和局域网地址，再创建验证 Widget 和 Tunnel。云端权限与域名状态在发布时核验。':'填写后需要保存；只读 Token 和手动 Turnstile 密钥不影响新增网站。';
-  $('#setup-progress-add').hidden=!ready;
+  const progress=ready?setupProgress(state):null;
+  $('#setup-progress').textContent=ready?progress.title:`账户配置 · ${setupFields.length-missing.length}/4 项已保存`;
+  $('#setup-progress-detail').textContent=ready?progress.detail:'填写后需要保存；只读 Token 和手动 Turnstile 密钥不影响新增网站。';
+  const nextButton=$('#setup-progress-add');
+  nextButton.hidden=!ready;
+  nextButton.textContent=progress?.label||'查看网站 →';
+  nextButton.dataset.next=progress?.next||'';
   for(const field of setupFields){
     const input=$(field.selector),pending=missing.includes(field),label=input.closest('label'),hint=$('#hint-'+field.key);
     const unsaved=field.key==='cf_write_token'?!!input.value.trim():!!$('#settings-form').dataset.dirty&&input.value!==(state.settings[field.key]||'');
@@ -113,7 +130,7 @@ $('#cancel-shutdown').onclick=()=>$('#shutdown-dialog').close();
 $('#confirm-shutdown').onclick=async e=>{const button=e.currentTarget;button.disabled=true;$('#cancel-shutdown').disabled=true;try{await api('shutdown',{});$('#shutdown-dialog').close();showAuth();$('#auth').hidden=true;$('#platform-stopped').hidden=false;}catch(err){$('#shutdown-error').textContent='退出请求未确认：'+err.message+'。请检查平台是否仍在运行；也可在启动终端按 Ctrl+C。';}finally{button.disabled=false;$('#cancel-shutdown').disabled=false;}};
 $('#settings-form').oninput=e=>{e.currentTarget.dataset.dirty='true';$('#settings-feedback').textContent='有未保存的修改。';renderSetup();};
 $('#credentials-form').oninput=()=>{$('#credentials-feedback').textContent='凭据尚未保存，请点击“加密保存凭据”。';renderSetup();};
-$('#setup-progress-add').onclick=()=>$('#add-site').onclick();
+$('#setup-progress-add').onclick=()=>{const next=$('#setup-progress-add').dataset.next;if(next==='add')return $('#add-site').onclick();if(next)go(next);};
 $('#settings-form').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,data=Object.fromEntries(new FormData(form));lockForm(form);try{await action(e.submitter,'settings','配置已保存',data);form.dataset.dirty='';invalidatePlan();await loadState().catch(()=>{});if(state)fillSettings();$('#settings-feedback').textContent='配置已保存。';}catch(err){$('#settings-feedback').textContent=err.message}finally{unlockForm(form);if(state)renderSetup();}};
 $('#credentials-form').onsubmit=async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));if(!Object.values(values).some(value=>String(value).trim())||(replacingWriteToken&&!String(values.cf_write_token||'').trim())){$('#credentials-feedback').textContent='请先粘贴要保存的新令牌；无需更换时点击取消更换。';if(!state.credentials.cf_write_token||replacingWriteToken)setTokenStep(2);return;}lockForm(e.target);try{await action(e.submitter,'credentials','凭据已加密保存',values);e.target.reset();replacingWriteToken=false;invalidatePlan();renderSetup();$('#credentials-feedback').textContent=state.cloudflare_setup.ready?'凭据已加密保存，现在可以添加网站。':'凭据已加密保存。'+setupMessage();}catch(err){$('#credentials-feedback').textContent=err.message}finally{unlockForm(e.target);if(state)renderSetup();}};
 $('#password-form').onsubmit=async e=>{e.preventDefault();try{await api('password',Object.fromEntries(new FormData(e.target)));e.target.reset();showAuth();toast('密码已修改，请重新登录')}catch(err){toast(err.message,true)}};
