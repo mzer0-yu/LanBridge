@@ -180,3 +180,7 @@ Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 C
 账户令牌目前不支持 Turnstile API；浏览器入口不会授予 Turnstile 权限。人类验证可手动配置 Site Key 与 Secret Key，或通过用户令牌流程自动配置。账户令牌权限可在 Cloudflare 账户 API Tokens 编辑，或重新浏览器授权创建；用户 API Tokens Write 修复入口不用于账户令牌。
 
 API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI](https://developers.cloudflare.com/cf/get-started/) 与 [账户令牌兼容性](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)。
+
+权限警告中的“浏览器授权并自动配置”按钮直接启动此流程，并显示进度。它创建替代写入令牌，不编辑当前用户令牌；OAuth 的 `account_api_tokens:create` 仅用于创建账户令牌。“修复当前令牌权限”使用独立的 API Tokens Write 用户授权，保留原令牌值。手动管理页面保留在账户配置说明中作为备用入口。
+
+授权包含 Tunnel 的旧版和 cloudflared 连接器权限范围；权限组识别兼容 Write / Edit 名称。Cloudflare 返回权限但标记 `is_selectable: false` 时明确提示不可授予，不创建令牌；请核对浏览器授予的范围以及账户角色。

@@ -28,6 +28,24 @@ def groups():
     ], 1)]
 
 
+@pytest.mark.parametrize("name", ["Cloudflare Tunnel Edit", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connector: cloudflared Edit"])
+def test_tunnel_permission_aliases_remain_account_scoped(manager, name):
+    available = groups()
+    available[0]["name"] = name
+    policies = manager.policies(available, manager.service.settings(), False)
+    assert policies[0]["permission_groups"] == [{"id": "1" * 32}]
+    assert policies[0]["resources"] == {"com.cloudflare.api.account." + "a" * 32: "*"}
+
+
+def test_unselectable_permission_is_distinct_from_missing_and_valid_alias_can_recover(manager):
+    available = groups()
+    available[0]["is_selectable"] = False
+    with pytest.raises(ValueError, match="不可授予"):
+        manager.policies(available, manager.service.settings(), False)
+    available.append({"id": "c" * 32, "name": "Cloudflare One Connector: cloudflared Write", "scopes": ["com.cloudflare.api.account"], "is_selectable": True})
+    assert manager.policies(available, manager.service.settings(), False)[0]["permission_groups"] == [{"id": "c" * 32}]
+
+
 def mock_api(monkeypatch, respond):
     original = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))

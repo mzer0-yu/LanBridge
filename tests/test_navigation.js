@@ -101,3 +101,26 @@ test('a running mutation cannot be submitted a second time',async()=>{
   let finish;let count=0;const context=asyncHarness({api:async(path)=>{if(path==='state')return ready();count++;return new Promise(resolve=>finish=resolve);}});const button={dataset:{},disabled:false};
   const first=context.action(button,'create-tunnel',null,{});await assert.rejects(context.action(button,'create-tunnel',null,{}),/正在进行/);finish({saved:true});await first;assert.equal(count,1);
 });
+
+test('browser shortcut opens settings and starts authorization; repair remains a separate action',async()=>{
+  const calls=[],status={};
+  const context={go:view=>calls.push(view),$:selector=>selector==='#browser-authorize'?{scrollIntoView:()=>calls.push('scroll')}:status,action:async(button,endpoint,message,body)=>calls.push(endpoint)};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('async function startBrowserAuthorization('),source.indexOf('let browserAuthPoll;')),context);
+  await context.startBrowserAuthorization({dataset:{}});
+  assert.deepEqual(calls,['settings','scroll','cloudflare/browser-authorize']);
+  const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+  const alert=html.slice(html.indexOf('id="cloudflare-permission-alert"'),html.indexOf('id="state-refresh-warning"'));
+  assert(alert.includes('data-browser-authorize="true"'));
+  assert(alert.includes('修复当前令牌权限'));
+  assert(alert.includes('旧令牌保留'));
+  assert(!alert.includes('手动编辑 Cloudflare'));
+});
+
+test('browser authorization launch failure stays visible next to its entry',async()=>{
+  const status={};const context={go(){},$:selector=>selector==='#browser-authorize'?{scrollIntoView(){}}:status,action:async()=>{throw Error('账户未配置');}};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('async function startBrowserAuthorization('),source.indexOf('let browserAuthPoll;')),context);
+  await context.startBrowserAuthorization({dataset:{}});
+  assert.equal(status.textContent,'账户未配置');assert.equal(status.className,'form-feedback error');
+});

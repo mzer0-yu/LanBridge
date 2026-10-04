@@ -40,13 +40,17 @@ class TokenManager:
         if not isinstance(groups, list) or any(not isinstance(g, dict) for g in groups):
             raise ValueError("Cloudflare 权限列表格式异常；未创建或修改令牌。")
         def group(names, scope):
+            unavailable = False
             for name in names:
                 matches = [g for g in groups if g.get("name") == name and isinstance(g.get("scopes"), list) and scope in g["scopes"] and g.get("is_selectable", True)]
+                unavailable = unavailable or any(g.get("name") == name and isinstance(g.get("scopes"), list) and scope in g["scopes"] and g.get("is_selectable") is False for g in groups)
                 if len(matches) == 1 and isinstance(matches[0].get("id"), str) and re.fullmatch(r"[a-fA-F0-9]{32}", matches[0]["id"]):
                     return {"id": matches[0]["id"]}
+            if unavailable:
+                raise ValueError("Cloudflare 返回了所需权限但当前授权不可授予：" + names[0] + "；未创建或修改令牌。")
             raise ValueError("Cloudflare 未提供所需权限：" + names[0] + "；未创建或修改令牌。")
         account_scope, zone_scope = "com.cloudflare.api.account", "com.cloudflare.api.account.zone"
-        account = [group(["Cloudflare Tunnel Read", "Cloudflare One Connector: cloudflared Read", "Cloudflare One Connectors Read"] if target == "read" else ["Cloudflare Tunnel Write", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connectors Write"], account_scope)]
+        account = [group(["Cloudflare Tunnel Read", "Cloudflare One Connector: cloudflared Read", "Cloudflare One Connectors Read"] if target == "read" else ["Cloudflare Tunnel Write", "Cloudflare Tunnel Edit", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connector: cloudflared Edit", "Cloudflare One Connectors Write", "Cloudflare One Connectors Edit"], account_scope)]
         if human_check and target == "write":
             account.append(group(["Turnstile Write", "Turnstile Edit"], account_scope))
         zone = [group(["DNS Read"] if target == "read" else ["DNS Write", "DNS Edit"], zone_scope), group(["Zone Read"], zone_scope)]

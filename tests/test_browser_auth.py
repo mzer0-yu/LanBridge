@@ -95,3 +95,22 @@ def test_account_token_turnstile_is_explained_before_network_request(browser):
     browser.service.store.set("managed_business_token",{"kind":"account"})
     with pytest.raises(ValueError,match="不支持 Turnstile"):
         browser.service.cf.request("POST","/accounts/"+"a"*32+"/challenges/widgets",{})
+
+
+def test_successful_login_without_selectable_tunnel_permissions_never_creates(browser, monkeypatch):
+    calls = []
+    def run(command, env, cwd, args, timeout=45):
+        calls.append(args)
+        if "permission-groups" in args:
+            available = groups()
+            available[0]["is_selectable"] = False
+            return json.dumps(available)
+        return "authorized"
+    monkeypatch.setattr(browser, "run", run)
+    browser.start(); browser.thread.join(timeout=5)
+    assert browser.status()["phase"] == "error"
+    assert "不可授予" in browser.status()["message"]
+    assert "浏览器登录成功不代表" in browser.status()["message"]
+    assert not any(args[:3] == ["accounts", "tokens", "create"] for args in calls)
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+    assert browser.service.store.get("pending_browser_token") is None

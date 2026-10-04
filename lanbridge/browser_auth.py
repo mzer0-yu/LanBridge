@@ -16,7 +16,7 @@ from .token_manager import TokenManager
 from .service import digest
 
 VERSION = "1.0.0-beta.12"
-SCOPES = ["account:read", "account_api_tokens:create", "argotunnel.write", "dns.write", "zone.read"]
+SCOPES = ["account:read", "account_api_tokens:create", "argotunnel.write", "teams-connector-cloudflared.write", "dns.write", "zone.read"]
 
 
 class BrowserAuth:
@@ -139,7 +139,10 @@ class BrowserAuth:
                     self.run(command, env, directory, ["auth", "create", "lanbridge", "--no-device", "--scopes", *scopes], timeout=180)
                     self.update("creating", "授权已完成，正在核对权限并创建账户令牌…")
                     groups = self.payload(self.run(command, env, directory, ["accounts", "tokens", "permission-groups", "list", "--profile", "lanbridge"]))
-                    policies = TokenManager.policies(groups, cfg, human_check)
+                    try:
+                        policies = TokenManager.policies(groups, cfg, human_check)
+                    except ValueError as exc:
+                        raise ValueError(str(exc) + " 浏览器登录成功不代表所需权限已授予；请重新授权并核对 Tunnel、DNS、Zone 及 Account API Token Provisioning，同时确认账户角色允许创建令牌。") from None
                     with self.service.lock:
                         current = self.service.settings()
                         if any(current[k] != cfg[k] for k in ("account_id", "zone_id", "zone_name")) or digest(store.secret("cf_write_token")) != cfg["credential_digest"]:
