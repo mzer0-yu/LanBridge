@@ -163,7 +163,18 @@ function locateTokenManager(){
   form.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
+let browserAuthPoll;
+function renderBrowserAuth(){
+  const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
+  $("#browser-auth-status").textContent=job.message;
+  $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
+  $("#browser-authorize").disabled=active||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;
+  if(active&&!browserAuthPoll)browserAuthPoll=setInterval(()=>{if(state)loadState().catch(()=>{});else{clearInterval(browserAuthPoll);browserAuthPoll=null;}},2000);
+  if(!active&&browserAuthPoll){clearInterval(browserAuthPoll);browserAuthPoll=null;}
+}
+$("#browser-authorize").onclick=async e=>{try{await action(e.currentTarget,"cloudflare/browser-authorize",null,{});}catch{}};
 function renderTokenManager(){
+  renderBrowserAuth();
   const management=state.token_management||{},cfg=state.settings;
   const ready=!!tokenTemplateURL(cfg)&&!!cfg.zone_name;
   $('#token-manager-submit').disabled=!ready||!!management.pending||!!$('#token-manager-form').dataset.busy||!!$('#token-manager-submit').dataset.busy;
@@ -173,7 +184,8 @@ function renderTokenManager(){
   $('#token-create-read').disabled=!ready||busy||!!management.pending_read;
   $('#token-create-read').textContent='自动创建新只读 API Token';
   $('#token-repair-read').disabled=!ready||busy||!state.credentials.cf_read_token;
-  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token;
+  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token||management.managed?.kind==='account';
+  $('#token-repair-write').title=management.managed?.kind==='account'?'账户令牌请重新浏览器授权创建，或在 Cloudflare 账户 API Tokens 编辑':'为当前令牌补齐权限，保留令牌值';
   $('#token-manager-forget').disabled=busy;
   $('#read-manager-status').textContent=management.pending_read?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending_read.name+'；平台不会重复创建。':management.managed_read?'只读令牌已托管，可自动更新权限。':state.credentials.cf_read_token?'只读令牌已保存，可选择修复当前权限。':'未配置只读令牌；创建后读取操作会使用它。';
   $('#token-manager-forget').hidden=!management.authority_saved;

@@ -66,9 +66,13 @@ class TokenManager:
             pending_key = "pending_read_token" if target == "read" else "pending_business_token"
             if not all(re.fullmatch(r"[a-fA-F0-9]{32}", cfg[k]) for k in ("account_id", "zone_id")) or not cfg["zone_name"]:
                 raise ValueError("请先保存 Account ID、Zone ID 和 Zone 名称。")
+            if target == "write" and store.get("pending_browser_token"):
+                raise ValueError("浏览器令牌创建结果未知，请先在 Cloudflare 核对并手动接入。")
             authority = authority.strip() or store.secret("cf_token_authority")
             if not 10 <= len(authority) <= 4096:
                 raise ValueError("请提供 API Tokens Write 授权令牌。")
+            if not force_new and target == "write" and (store.get("managed_business_token") or {}).get("kind") == "account":
+                raise ValueError("当前是浏览器授权创建的账户令牌，请重新使用浏览器授权创建，或在 Cloudflare 账户 API Tokens 编辑权限。")
             groups = self.request(authority, "GET", "/user/tokens/permission_groups")
             policies = self.policies(groups, cfg, human_check, target)
             owned = None if force_new else store.get(record_key)

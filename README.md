@@ -170,3 +170,13 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 参考：https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/
 
 自动创建新令牌入口始终新建并加密保存，即使已有托管令牌；成功后切换本机凭据，旧令牌不会删除。API/MCP 使用 `force_new: true`，CLI 使用 `--force-new`；不可与 `repair_existing` 同时使用。创建结果未知时仍禁止重复创建。
+
+## 浏览器授权创建令牌
+
+账户与配置 → 浏览器授权并创建令牌。使用官方 `cf` CLI 1.0.0-beta.12 的 PKCE 本机回调流程，在系统浏览器登录并确认授权后，通过账户令牌 API 创建限定到配置账户和 Zone 的 Tunnel Write、DNS Write、Zone Read 令牌。无需手动提供 API Tokens Write。用户必须具备 API Token Provisioning 或相应管理员权限。创建成功后切换本机写入凭据，旧令牌不删除。
+
+Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。临时 OAuth 配置位于受保护的数据目录，流程结束尝试撤销临时 CLI 登录并删除本机临时配置，不影响其他 CLI 登录。不保存账户密码，也不将令牌值返回界面。创建结果未知时阻止再次创建，需在 Cloudflare 账户 API Tokens 核对并手动接入。授权期间改变账户、域名或写入凭据会阻止创建。
+
+账户令牌目前不支持 Turnstile API；浏览器入口不会授予 Turnstile 权限。人类验证可手动配置 Site Key 与 Secret Key，或通过用户令牌流程自动配置。账户令牌权限可在 Cloudflare 账户 API Tokens 编辑，或重新浏览器授权创建；用户 API Tokens Write 修复入口不用于账户令牌。
+
+API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI](https://developers.cloudflare.com/cf/get-started/) 与 [账户令牌兼容性](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)。
