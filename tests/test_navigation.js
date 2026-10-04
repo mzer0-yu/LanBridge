@@ -192,3 +192,14 @@ test('overall setup progress appears only in overview, not account settings',()=
   assert(overview.includes('id="setup-progress"'));assert(overview.includes('id="setup-progress-add"'));
   assert(!settings.includes('setup-progress'));assert(settings.includes('Cloudflare 账户与域名'));
 });
+
+test('verification setup lists only enabled protected domains and leaves policies unchanged',()=>{
+  const nodes={};const context={$:selector=>nodes[selector]||=({})};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function renderHumanVerification('),source.indexOf('function renderCredentialsGuide(')),context);
+  const current={settings:{turnstile_sitekey:'public-key'},credentials:{turnstile_secret:true},sites:[{hostname:'protected.example.com',enabled:true,human_check:true},{hostname:'public.example.com',enabled:true,human_check:false},{hostname:'disabled.example.com',enabled:false,human_check:true}]};
+  const before=JSON.stringify(current);context.renderHumanVerification(current);
+  assert(nodes['#widget-scope'].textContent.includes('protected.example.com'));
+  assert(!nodes['#widget-scope'].textContent.includes('public.example.com'));
+  assert(!nodes['#widget-scope'].textContent.includes('disabled.example.com'));
+  assert.equal(nodes['#widget-create'].textContent,'同步验证域名');assert.equal(JSON.stringify(current),before);
+});
