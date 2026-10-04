@@ -230,6 +230,22 @@ def test_session_bound_to_host_ip_policy(service):
     assert not valid_pass(service, site, "203.0.113.4", token + "x")
 
 
+def test_gateway_redirects_public_http_and_keeps_strict_https_origin(service):
+    add_site(service)
+    app = create_gateway(service)
+    client = TestClient(app, base_url="http://app.example.com", client=("127.0.0.1", 12345), follow_redirects=False)
+    redirect = client.get("/deep/path?a=1", headers={"CF-Visitor": '{"scheme":"http"}'})
+    assert redirect.status_code == 308
+    assert redirect.headers["location"] == "https://app.example.com/deep/path?a=1"
+    edge = {"CF-Visitor": '{"scheme":"https"}'}
+    assert client.get("/", headers=edge | {"Accept": "text/html"}).status_code == 503
+    for origin in ("http://app.example.com", "https://evil.example.com", "null"):
+        result = client.post("/.lanbridge/verify", json={}, headers=edge | {"Origin": origin})
+        assert result.status_code == 403 and result.json()["detail"] == "来源校验失败"
+    external = TestClient(app, base_url="http://app.example.com", follow_redirects=False)
+    assert external.get("/", headers=edge).status_code == 308
+
+
 def test_unconfigured_turnstile_and_api_cannot_bypass(service):
     add_site(service)
     client = TestClient(create_gateway(service), base_url="https://app.example.com")

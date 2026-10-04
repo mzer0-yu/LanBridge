@@ -70,6 +70,19 @@ function locateSetup(key){
   input.scrollIntoView({behavior:'smooth',block:'center'});
   input.focus({preventScroll:true});
 }
+function setupProgress(current){
+  const count=current.sites.length,title=count?'已登记 '+count+' 个网站':'必填配置已保存';
+  if(!count)return {title,detail:'添加第一个网站，填写公网域名和局域网地址。',label:'添加网站 →',next:'add'};
+  const enabled=current.sites.filter(site=>site.enabled),cfg=current.settings;
+  if(!enabled.length)return {title,detail:'现有网站均未启用，可在网站映射中调整。',label:'管理网站 →',next:'sites'};
+  if(!cfg.tunnel_id)return {title,detail:'网站已登记，下一步创建 Tunnel，再发布网站映射。',label:'创建 Tunnel →',next:'connector'};
+  if(enabled.some(site=>site.human_check)&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))return {title,detail:'现有网站启用了人类验证，请先完成 Turnstile 密钥配置。',label:'自动配置人类验证 →',next:'security'};
+  const desired=enabled.map(site=>site.hostname).sort(),published=[...(current.published_hosts||[])].sort();
+  if(current.publication_needs_review||JSON.stringify(desired)!==JSON.stringify(published))return {title,detail:'网站映射尚需发布或核对，请在连接器中预览并应用配置。',label:'发布网站映射 →',next:'connector'};
+  const connector=connectorReadiness(current);
+  if(connector.attention)return {title,detail:connector.detail,label:'完成连接器配置 →',next:'connector'};
+  return {title,detail:'网站映射已登记并发布。可管理现有网站，或在连接器中核查公网连接。',label:'管理网站 →',next:'sites'};
+}
 function renderSetup(){
   renderTokenTemplate();
   renderCredentialsGuide();
@@ -86,9 +99,13 @@ function renderSetup(){
   $('#setup-next').textContent=missing[0]?'去配置'+missing[0].label+' →':'配置已完成';
   $('#setup-next').dataset.setup=missing[0]?.key||'';
   $('#step-settings').textContent=ready?'✓':'1';
-  $('#setup-progress').textContent=ready?'必填配置已保存，可以管理网站。':`准备添加网站 · ${setupFields.length-missing.length}/4 项已保存`;
-  $('#setup-progress-detail').textContent=ready?'下一步：登记公网域名和局域网地址，再创建验证 Widget 和 Tunnel。云端权限与域名状态在发布时核验。':'填写后需要保存；只读 Token 和手动 Turnstile 密钥不影响新增网站。';
-  $('#setup-progress-add').hidden=!ready;
+  const progress=ready?setupProgress(state):null;
+  $('#setup-progress').textContent=ready?progress.title:`账户配置 · ${setupFields.length-missing.length}/4 项已保存`;
+  $('#setup-progress-detail').textContent=ready?progress.detail:'填写后需要保存；只读 Token 和手动 Turnstile 密钥不影响新增网站。';
+  const nextButton=$('#setup-progress-add');
+  nextButton.hidden=!ready;
+  nextButton.textContent=progress?.label||'查看网站 →';
+  nextButton.dataset.next=progress?.next||'';
   for(const field of setupFields){
     const input=$(field.selector),pending=missing.includes(field),label=input.closest('label'),hint=$('#hint-'+field.key);
     const unsaved=field.key==='cf_write_token'?!!input.value.trim():!!$('#settings-form').dataset.dirty&&input.value!==(state.settings[field.key]||'');
@@ -113,12 +130,19 @@ $('#cancel-shutdown').onclick=()=>$('#shutdown-dialog').close();
 $('#confirm-shutdown').onclick=async e=>{const button=e.currentTarget;button.disabled=true;$('#cancel-shutdown').disabled=true;try{await api('shutdown',{});$('#shutdown-dialog').close();showAuth();$('#auth').hidden=true;$('#platform-stopped').hidden=false;}catch(err){$('#shutdown-error').textContent='退出请求未确认：'+err.message+'。请检查平台是否仍在运行；也可在启动终端按 Ctrl+C。';}finally{button.disabled=false;$('#cancel-shutdown').disabled=false;}};
 $('#settings-form').oninput=e=>{e.currentTarget.dataset.dirty='true';$('#settings-feedback').textContent='有未保存的修改。';renderSetup();};
 $('#credentials-form').oninput=()=>{$('#credentials-feedback').textContent='凭据尚未保存，请点击“加密保存凭据”。';renderSetup();};
-$('#setup-progress-add').onclick=()=>$('#add-site').onclick();
+$('#setup-progress-add').onclick=()=>{const next=$('#setup-progress-add').dataset.next;if(next==='add')return $('#add-site').onclick();if(next==='security'){go(next);return $('#widget-create').onclick({currentTarget:$('#widget-create')});}if(next)go(next);};
 $('#settings-form').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,data=Object.fromEntries(new FormData(form));lockForm(form);try{await action(e.submitter,'settings','配置已保存',data);form.dataset.dirty='';invalidatePlan();await loadState().catch(()=>{});if(state)fillSettings();$('#settings-feedback').textContent='配置已保存。';}catch(err){$('#settings-feedback').textContent=err.message}finally{unlockForm(form);if(state)renderSetup();}};
 $('#credentials-form').onsubmit=async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));if(!Object.values(values).some(value=>String(value).trim())||(replacingWriteToken&&!String(values.cf_write_token||'').trim())){$('#credentials-feedback').textContent='请先粘贴要保存的新令牌；无需更换时点击取消更换。';if(!state.credentials.cf_write_token||replacingWriteToken)setTokenStep(2);return;}lockForm(e.target);try{await action(e.submitter,'credentials','凭据已加密保存',values);e.target.reset();replacingWriteToken=false;invalidatePlan();renderSetup();$('#credentials-feedback').textContent=state.cloudflare_setup.ready?'凭据已加密保存，现在可以添加网站。':'凭据已加密保存。'+setupMessage();}catch(err){$('#credentials-feedback').textContent=err.message}finally{unlockForm(e.target);if(state)renderSetup();}};
 $('#password-form').onsubmit=async e=>{e.preventDefault();try{await api('password',Object.fromEntries(new FormData(e.target)));e.target.reset();showAuth();toast('密码已修改，请重新登录')}catch(err){toast(err.message,true)}};
 $('#site-form').onsubmit=async e=>{e.preventDefault();const f=e.target;const data=Object.fromEntries(new FormData(f));for(const k of ['enabled','human_check','passcode_required'])data[k]=f.elements[k].checked;for(const k of ['allowed_countries','allowed_ips'])data[k]=data[k].split(/[,，\s]+/).filter(Boolean);for(const k of ['requests_per_minute','session_minutes'])data[k]=Number(data[k]);lockForm(f);try{await action(e.submitter,'sites','网站与本机访问策略已保存；路由变更请到连接器页发布',data);f.elements.passcode.value='';$('#site-dialog').close();invalidatePlan()}catch(err){$('#site-error').textContent=err.message}finally{unlockForm(f);}};
-for(const [id,path,msg] of [['widget-create','cloudflare/turnstile','Turnstile 已同步；可继续预览并发布'],['cf-check','cloudflare/check','已获取 Cloudflare 边缘状态'],['connector-start','connector/start','已启动连接器，请通过 API 核查边缘状态'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
+for(const [id,path,msg] of [['cf-check','cloudflare/check','已获取 Cloudflare 边缘状态'],['connector-start','connector/start','已启动连接器，请通过 API 核查边缘状态'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
+$('#widget-create').onclick=async e=>{
+  try{
+    const result=await action(e.currentTarget,'cloudflare/turnstile-auto',null,{});
+    if(['preparing','authorizing','creating'].includes(result.phase)){go('settings');$('#browser-authorize').scrollIntoView({behavior:'smooth',block:'center'});}
+    else toast('人类验证已自动配置，可继续预览并发布网站');
+  }catch{}
+};
 $('#preview').onclick=async e=>{invalidatePlan();try{plan=await action(e.currentTarget,'cloudflare/preview');$('#plan-json').textContent=JSON.stringify(plan,null,2);$('#plan-empty').hidden=true;$('#plan-content').hidden=false;}catch{}};
 $('#apply').onclick=async e=>{if(!plan)return;try{await action(e.currentTarget,'cloudflare/apply','路由与 DNS 写后核验通过，无需重启连接器',{revision:plan.revision});invalidatePlan()}catch{invalidatePlan()}};
 api('bootstrap').then(r=>{initialized=r.initialized;csrf=r.csrf;if(r.authenticated)openShell();else showAuth()}).catch(e=>$('#auth-error').textContent=e.message);
@@ -177,20 +201,30 @@ let browserAuthPoll;
 function browserAuthMessage(job){
   if(job.phase!=='authorizing'||!Number.isFinite(job.updated_at))return job.message;
   const seconds=Math.max(0,Math.ceil(120-(Date.now()/1000-job.updated_at)));
-  return job.message+(seconds>0?' 预计剩余约 '+seconds+' 秒。':' 等待已接近时限，正在确认授权结果；若浏览器回调连接失败，请等待本次任务结束后重新发起。');
+  return job.message+(seconds>0?' 预计剩余约 '+seconds+' 秒。':' 等待已接近时限，正在确认授权结果；误关浏览器或回调连接失败时，可立即重新打开授权页或取消。');
 }
 function renderBrowserAuth(){
-  const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
+  const job=state.browser_auth||{phase:"idle",message:"在浏览器授权后自动接入 Cloudflare。"},active=["preparing","authorizing","creating","cancelling"].includes(job.phase);
   $("#browser-auth-status").textContent=browserAuthMessage(job);
   $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
   for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
     button.disabled=active||!!button.dataset.busy||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;
-    button.title=active?'浏览器授权正在进行':state.token_management?.pending?'先前创建结果未知，请先核对':!tokenTemplateURL(state.settings)||!state.settings.zone_name?'请先保存账户和域名配置':'授权后创建新令牌并切换本机凭据，保留 Cloudflare 中的旧令牌';
+    button.title=active?'浏览器授权正在进行':state.token_management?.pending?'先前创建结果未知，请先核对':!tokenTemplateURL(state.settings)||!state.settings.zone_name?'请先保存账户和域名配置':'授权后自动接入并刷新凭据';
   }
+  const controls=[$('#browser-authorize-restart'),$('#browser-authorize-cancel')];
+  const recoveryBusy=controls.some(button=>!!button.dataset.busy);
+  for(const button of controls){button.hidden=job.phase!=='authorizing'&&job.phase!=='cancelling';button.disabled=job.phase!=='authorizing'||recoveryBusy;}
   if(active&&!browserAuthPoll)browserAuthPoll=setInterval(()=>{if(state)loadState().catch(()=>{});else{clearInterval(browserAuthPoll);browserAuthPoll=null;}},2000);
   if(!active&&browserAuthPoll){clearInterval(browserAuthPoll);browserAuthPoll=null;}
 }
 $("#browser-authorize").onclick=e=>startBrowserAuthorization(e.currentTarget);
+async function recoverBrowserAuthorization(button,operation){
+  if(button.dataset.busy||[$('#browser-authorize-restart'),$('#browser-authorize-cancel')].some(control=>!!control.dataset.busy))return;
+  try{await action(button,'cloudflare/browser-authorize-'+operation,null,{});}
+  catch(err){$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+}
+$('#browser-authorize-restart').onclick=e=>recoverBrowserAuthorization(e.currentTarget,'restart');
+$('#browser-authorize-cancel').onclick=e=>recoverBrowserAuthorization(e.currentTarget,'cancel');
 function renderTokenManager(){
   renderBrowserAuth();
   const management=state.token_management||{},cfg=state.settings;

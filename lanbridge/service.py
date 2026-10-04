@@ -23,6 +23,16 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def tunnel_config_equal(actual, expected):
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual == expected
+    # Cloudflare materializes this default when the first config is written.
+    left, right = deepcopy(actual), deepcopy(expected)
+    left.setdefault("warp-routing", {"enabled": False})
+    right.setdefault("warp-routing", {"enabled": False})
+    return left == right
+
+
 def lan_address(host):
     try:
         addresses = [ipaddress.ip_address(host)]
@@ -52,8 +62,12 @@ class Cloudflare:
         self.service = service
 
     def request(self, method, path, body=None):
-        if "/challenges/widgets" in path and (self.service.store.get("managed_business_token") or {}).get("kind") in ("account", "oauth"):
-            raise ValueError("当前浏览器授权或账户令牌未包含 Turnstile 权限，不支持 Turnstile API。请手动配置 Turnstile Site/Secret Key，或使用具备 Turnstile 权限的用户令牌。")
+        if "/challenges/widgets" in path:
+            kind = (self.service.store.get("managed_business_token") or {}).get("kind")
+            if kind == "account":
+                raise ValueError("Cloudflare 账户令牌不支持 Turnstile API，请使用浏览器授权自动配置人类验证。")
+            if kind == "oauth" and not self.widgets_authorized():
+                raise ValueError("当前浏览器授权缺少 Turnstile 权限，请点击“自动配置人类验证”补充授权，随后自动创建并保存密钥。")
         sensitive_read = path.endswith("/token") or "/challenges/widgets" in path
         credential = "cf_read_token" if method == "GET" and not sensitive_read else "cf_write_token"
         token = self.service.store.secret(credential)
@@ -183,26 +197,82 @@ class Cloudflare:
             self.service.store.set_secret("tunnel_token", token)
             return {"id": result["id"], "token_saved": True}
 
+    def widgets_authorized(self):
+        if (self.service.store.get("managed_business_token") or {}).get("kind") != "oauth":
+            return (self.service.store.get("managed_business_token") or {}).get("kind") != "account"
+        try:
+            profile = json.loads(self.service.store.secret("cf_oauth_profile"))["profile"]
+            return "challenge-widgets.write" in profile.get("scopes", [])
+        except (ValueError, KeyError, TypeError):
+            return False
+
     def create_widget(self):
         with self.service.lock:
+            store = self.service.store
             cfg = self.service.settings()
-            hosts = [s["hostname"] for s in self.service.sites() if s["enabled"] and s["human_check"]]
+            hosts = sorted({s["hostname"] for s in self.service.sites() if s["enabled"] and s["human_check"]})
             if not hosts:
                 raise ValueError("请先添加需要人类验证的网站")
+            if not self.widgets_authorized():
+                raise ValueError("请点击“自动配置人类验证”补充浏览器授权，无需手工填写密钥")
             self.zone()
             existing = cfg["turnstile_sitekey"]
-            if existing and not self.service.store.get("owned_widget"):
+            if existing and not store.get("owned_widget"):
                 raise ValueError("当前 Widget 为手工配置，请在 Cloudflare 管理允许域名")
             path = f'/accounts/{cfg["account_id"]}/challenges/widgets'
-            result = self.request("PUT" if existing else "POST", path + ("/" + existing if existing else ""),
-                                  {"name": "LanBridge", "domains": hosts, "mode": "managed"})
-            cfg["turnstile_sitekey"] = result["sitekey"]
-            self.service.store.set("settings", cfg)
-            self.service.store.set("owned_widget", result["sitekey"])
-            if result.get("secret"):
-                self.service.store.set_secret("turnstile_secret", result["secret"])
-            self.service.store.audit("turnstile_updated", {"hostnames": hosts})
-            return {"sitekey": cfg["turnstile_sitekey"], "hostnames": hosts}
+            pending = store.get("pending_widget_create")
+            if pending:
+                if pending.get("account_id") != cfg["account_id"]:
+                    raise ValueError("待核对 Widget 属于其他账户，停止自动创建")
+                if pending.get("sitekey"):
+                    existing = pending["sitekey"]
+                else:
+                    matches = []
+                    for page in range(1, 21):
+                        rows = self.request("GET", path + f"?page={page}&per_page=100")
+                        if not isinstance(rows, list):
+                            raise RuntimeError("无法核对先前 Widget 创建结果，未重复创建")
+                        matches.extend(r for r in rows if r.get("name") == pending["name"])
+                        if len(rows) < 100:
+                            break
+                    if len(matches) != 1:
+                        raise ValueError("先前 Widget 创建结果待核对，未重复创建；请稍后重试自动配置")
+                    existing = matches[0]["sitekey"]
+            if existing:
+                result = self.request("GET", path + "/" + existing)
+                domains = sorted(set(result.get("domains", [])) | set(hosts))
+                if not all(any(h == d or h.endswith("." + d) for d in result.get("domains", [])) for h in hosts):
+                    result = self.request("PUT", path + "/" + existing, {"name": result.get("name", "LanBridge"), "domains": domains, "mode": result.get("mode", "managed")})
+            else:
+                name = store.get("turnstile_widget_name") or "LanBridge-" + secrets.token_hex(8)
+                store.set("turnstile_widget_name", name)
+                store.set("pending_widget_create", {"name": name, "account_id": cfg["account_id"], "requested_at": time.time()})
+                try:
+                    result = self.request("POST", path, {"name": name, "domains": hosts, "mode": "managed"})
+                except ValueError:
+                    store.set("pending_widget_create", None)
+                    raise
+                except RuntimeError as exc:
+                    if re.search(r"Cloudflare API HTTP 4\d\d", str(exc)):
+                        store.set("pending_widget_create", None)
+                    raise
+                if not isinstance(result, dict) or not result.get("sitekey"):
+                    raise RuntimeError("Widget 创建结果不完整，请重试核对")
+                existing = result["sitekey"]
+                store.set("pending_widget_create", store.get("pending_widget_create") | {"sitekey": existing})
+            secret = result.get("secret") or (store.secret("turnstile_secret") if existing == cfg["turnstile_sitekey"] else "")
+            if not secret:
+                result = self.request("GET", path + "/" + existing)
+                secret = result.get("secret")
+            if not isinstance(secret, str) or not 10 <= len(secret) <= 4096:
+                raise RuntimeError("未收到有效 Turnstile 密钥，请重试自动配置；不会关闭人类验证")
+            cfg["turnstile_sitekey"] = existing
+            with store.lock, store.db:
+                store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", ("turnstile_secret", store.cipher.encrypt(secret.encode()).decode()))
+                for key, value in (("settings", cfg), ("owned_widget", existing), ("pending_widget_create", None)):
+                    store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
+            store.audit("turnstile_updated", {"hostnames": hosts})
+            return {"sitekey": existing, "hostnames": hosts, "saved": True}
 
     def plan(self):
         self.zone()
@@ -265,7 +335,7 @@ class Cloudflare:
                 if latest["routes_changed"]:
                     self.request("PUT", self.tunnel_path() + "/configurations", {"config": latest["after"]})
                 actual = self.request("GET", self.tunnel_path() + "/configurations")
-                if actual.get("config") != latest["after"]:
+                if not tunnel_config_equal(actual.get("config"), latest["after"]):
                     raise RuntimeError("远端配置写后核验失败，请重新预览并检查远端")
                 for item in latest["dns"]:
                     rows = self.request("GET", f'/zones/{cfg["zone_id"]}/dns_records?name={item["hostname"]}')

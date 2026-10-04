@@ -129,7 +129,7 @@ test('authorization progress shows the wait limit and expired callback recovery'
   const context={Date:{now:()=>1000000},Number,Math};vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function browserAuthMessage('),source.indexOf('function renderBrowserAuth(')),context);
   assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:940,message:'授权中'}),/60 秒/);
-  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新发起/);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/立即重新打开授权页或取消/);
   assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
 });
 
@@ -138,4 +138,55 @@ test('browser connection has no mandatory authority-token fallback',()=>{
   assert(!html.includes('id="browser-auth-fallback"'));
   assert(!source.includes("$('#browser-auth-fallback')"));
   assert(html.includes('自动刷新凭据'));
+});
+
+
+test('closed browser can restart or cancel without waiting for expiry',()=>{
+  const nodes={};const context={state:{browser_auth:{phase:'authorizing',message:'等待确认',updated_at:Date.now()/1000},settings:{}},$:selector=>nodes[selector]||=({dataset:{}}),document:{querySelectorAll:()=>[]},Number,Math,Date,setInterval:()=>1,clearInterval(){}};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('let browserAuthPoll;'),source.indexOf('$("#browser-authorize").onclick')),context);
+  context.renderBrowserAuth();
+  for(const id of ['restart','cancel']){assert.equal(nodes['#browser-authorize-'+id].hidden,false);assert.equal(nodes['#browser-authorize-'+id].disabled,false);}
+  nodes['#browser-authorize-cancel'].dataset.busy='1';context.renderBrowserAuth();assert.equal(nodes['#browser-authorize-restart'].disabled,true);
+  nodes['#browser-authorize-cancel'].dataset.busy='';context.state.browser_auth.phase='cancelling';context.renderBrowserAuth();assert.equal(nodes['#browser-authorize-restart'].disabled,true);
+  context.state.browser_auth.phase='cancelled';context.renderBrowserAuth();assert.equal(nodes['#browser-authorize-restart'].hidden,true);
+});
+
+
+function progressHarness(state){
+  const {context}=harness(state);
+  vm.runInContext(source.slice(source.indexOf('function setupProgress('),source.indexOf('function renderSetup(')),context);
+  return context.setupProgress(state);
+}
+test('setup only offers adding the first website when none exists',()=>{
+  const state=ready();assert.equal(progressHarness(state).next,'add');
+  state.sites=[{enabled:true,hostname:'app.example.com',human_check:false}];state.settings.tunnel_id='';
+  const progress=progressHarness(state);assert.equal(progress.title,'已登记 1 个网站');assert.equal(progress.next,'connector');assert.equal(progress.label,'创建 Tunnel →');assert(!progress.detail.includes('登记公网域名'));
+});
+test('existing websites lead to the remaining verification or publishing step',()=>{
+  const state=ready();state.sites=[{enabled:true,hostname:'app.example.com',human_check:true}];state.settings.turnstile_sitekey='';
+  assert.equal(progressHarness(state).next,'security');
+  state.settings.turnstile_sitekey='key';assert.equal(progressHarness(state).label,'发布网站映射 →');
+  state.published_hosts=['app.example.com'];assert.equal(progressHarness(state).next,'sites');
+  state.connector.running=false;assert.equal(progressHarness(state).label,'完成连接器配置 →');
+});
+test('disabled existing websites still lead to management rather than a new website dialog',()=>{
+  const state=ready();state.sites=[{enabled:false,hostname:'app.example.com'}];
+  assert.equal(progressHarness(state).next,'sites');assert.equal(progressHarness(state).label,'管理网站 →');
+});
+test('progress button follows the displayed action without opening an unintended add dialog',()=>{
+  let added=0,navigated;const button={dataset:{next:'connector'}};
+  const context={$:selector=>selector==='#setup-progress-add'?button:{onclick:()=>added++},go:view=>navigated=view};vm.createContext(context);
+  vm.runInContext(source.match(/^\$\('#setup-progress-add'\)\.onclick=.*$/m)[0],context);
+  button.onclick();assert.equal(navigated,'connector');assert.equal(added,0);
+  button.dataset.next='add';button.onclick();assert.equal(added,1);
+});
+
+
+test('overall setup progress appears only in overview, not account settings',()=>{
+  const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+  const overview=html.match(/<section id="view-overview"[^>]*>(.*?)<\/section>/s)[1];
+  const settings=html.match(/<section id="view-settings"[^>]*>(.*?)<\/section>/s)[1];
+  assert(overview.includes('id="setup-progress"'));assert(overview.includes('id="setup-progress-add"'));
+  assert(!settings.includes('setup-progress'));assert(settings.includes('Cloudflare 账户与域名'));
 });

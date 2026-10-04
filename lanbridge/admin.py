@@ -256,6 +256,10 @@ def create_admin(service, shutdown=None):
         data = await body(request)
         if action == "browser-authorize":
             return browser_auth.start()
+        if action == "browser-authorize-cancel":
+            return await asyncio.to_thread(browser_auth.cancel)
+        if action == "browser-authorize-restart":
+            return await asyncio.to_thread(browser_auth.restart)
         if action == "provision-token":
             from .token_manager import TokenManager
             if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool) or data.get("target", "write") not in ("write", "read") or not isinstance(data.get("repair_existing", False), bool) or not isinstance(data.get("force_new", False), bool):
@@ -266,6 +270,10 @@ def create_admin(service, shutdown=None):
             return {"removed": True}
         if action == "create-tunnel":
             return await asyncio.to_thread(service.cf.create_tunnel)
+        if action == "turnstile-auto":
+            if not service.cf.widgets_authorized():
+                return browser_auth.start()
+            return await asyncio.to_thread(service.cf.create_widget)
         if action == "turnstile":
             return await asyncio.to_thread(service.cf.create_widget)
         if action == "preview":

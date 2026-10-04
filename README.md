@@ -24,7 +24,7 @@ Set-Location <本项目目录>
 3. 添加网站，例如 `app.example.com` → `http://192.168.1.20:3000`。这台 Windows 电脑必须能访问该源站，源站 URL 不带路径。默认开启人类验证；可组合访问口令、国家/IP 白名单和限流。口令至少 12 位。
 
 添加网站前必须已保存 Account ID、Zone ID、Zone 名称和写入 API Token；缺少任一项时，“添加网站”按钮禁用；各管理页面持续显示缺少的字段，并提供“前往账户与配置”入口，不会打开新增表单。点击可用按钮后先刷新配置状态，再打开表单。API/CLI 同样拒绝创建。此检查表示必填配置已保存，实际令牌权限及 Zone Active 状态在云端操作时核验。Tunnel 和 Turnstile 可在登记网站后创建，不作为新增网站的前置条件。已有网站仍允许编辑和停用。
-4. 如启用人类验证，在“访问策略”点击“创建 / 同步 Widget 域名”，通过 Cloudflare API 创建 Managed Turnstile Widget 并加密保存 Secret。手工配置的 Widget 需自行在 Cloudflare 管理允许域名；本平台不接管手工 Widget。新增人类验证域名后再次同步。
+4. 如启用人类验证，在“访问策略”点击“自动配置人类验证”。旧授权缺少权限时打开官方浏览器授权，完成后自动创建 Managed Turnstile Widget 并加密保存 Secret。手工配置的 Widget 需自行在 Cloudflare 管理允许域名；本平台不接管手工 Widget。新增人类验证域名后再次同步。
 5. 在“连接器”创建Tunnel。平台在自定义名称后加随机标识，记录其 ID，读取连接令牌并加密保存。创建成功但令牌读取失败时，再点击会重试获取令牌。创建请求结果未知时，按唯一名称查找恢复；找不到或结果不唯一时停止，不盲目重复创建。
 6. 点击“预览 Cloudflare 配置”，检查 ingress 和将创建的 DNS；点击“应用此预览并核验”。平台重新读取远端配置及 DNS，对比 revision 后才写入。只管理平台登记的网站路由，保留其他 hostname 路由和配置字段，末尾为 `http_status:404`。
 7. 启动连接器，再点击“通过 API 核查”。使用外部网络打开公网域名，确认验证页面、源站网页、登录和 WebSocket 均正常。API 核查反映 Tunnel 边缘连接，不能替代实际公网端到端验证。
@@ -173,12 +173,14 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 
 ## 浏览器授权接入 Cloudflare
 
-账户与配置 → 浏览器授权并自动配置。官方 `cf` CLI 1.0.0-beta.12 使用 PKCE 本机回调；用户在浏览器确认一次 Tunnel Write、DNS Write、Zone Read 和账户读取权限。平台直接使用 OAuth 授权访问 API，不创建子令牌，不需要 API Tokens Write 或 Account API Token Provisioning。授权后先核对实际范围、域名名称、账户归属及 Active 状态，再替换本机凭据；失败保留原凭据。
+账户与配置 → 浏览器授权并自动配置。官方 `cf` CLI 1.0.0-beta.12 使用 PKCE 本机回调；用户在浏览器确认一次 Tunnel Write、DNS Write、Zone Read、Turnstile 和账户读取权限。平台直接使用 OAuth 授权访问 API，不创建子令牌，不需要 API Tokens Write 或 Account API Token Provisioning。授权后先核对实际范围、域名名称、账户归属及 Active 状态，再替换本机凭据；失败保留原凭据。
+
+CLI：`run.py serve --authorize-cloudflare` 在启动平台后发起同一浏览器授权流程，进度及取消操作仍由管理界面提供。
 
 授权和刷新凭据通过 Windows DPAPI 加密保存。每次 API 操作前检查有效期，接近到期时通过官方 CLI 自动刷新。刷新使用独立的受保护临时目录，结束删除临时文件；不影响用户其他 CLI 登录，不保存账户密码，秘密不返回管理页面或日志。撤销授权、资源权限变化或网络异常可能需要重新授权。
 
-Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。官方本机回调等待约 2 分钟；超时需要重新发起，旧回调地址无法继续。授权期间修改账户、域名或凭据会停止本次配置。
+Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。官方本机回调等待约 2 分钟，但无需等到超时：等待期间可点击“取消授权”立即结束请求，或“重新打开授权页”结束旧请求并发起新授权。旧页面随即失效；取消保留原凭据。API 对应 `POST /api/cloudflare/browser-authorize-cancel` 和 `POST /api/cloudflare/browser-authorize-restart`，同样要求管理员会话、Origin 和 CSRF。授权期间修改账户、域名或凭据会停止本次配置。
 
-此 OAuth 范围不包含 Turnstile。人类验证可单独配置 Site Key 和 Secret Key，或使用高级用户令牌管理流程。手动更换写入令牌会清除本机 OAuth 凭据，切回令牌模式。
+浏览器授权包含 `challenge-widgets.write`。启用人类验证的网站在授权完成后自动创建或同步专属 Widget，原子保存 Site Key 与加密 Secret Key。已有旧授权在点击“自动配置人类验证”后补充一次浏览器授权，随后自动完成配置。创建结果未知时按专属名称核对并恢复，禁止盲目重复创建；不改动其他项目的 Widget。手动更换写入令牌会清除本机 OAuth 凭据，切回令牌模式。
 
 API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI 授权说明](https://developers.cloudflare.com/cf/get-started/)。

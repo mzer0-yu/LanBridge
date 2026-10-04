@@ -39,7 +39,7 @@ def acquire_runtime(root):
     return handle
 
 
-def serve(service, open_browser=False):
+def serve(service, open_browser=False, authorize_cloudflare=False):
     import uvicorn
     from lanbridge.admin import create_admin
     from lanbridge.gateway import create_gateway
@@ -62,6 +62,8 @@ def serve(service, open_browser=False):
         def shutdown():
             admin.should_exit = True
         admin = uvicorn.Server(uvicorn.Config(create_admin(service, shutdown), host="127.0.0.1", port=cfg["admin_port"], proxy_headers=False, access_log=False, log_level="warning"))
+        if authorize_cloudflare:
+            service.browser_auth.start()
         if open_browser:
             def show_browser():
                 import time
@@ -91,6 +93,7 @@ def main():
     sub.add_parser("capabilities")
     server = sub.add_parser("serve")
     server.add_argument("--open-browser", action="store_true")
+    server.add_argument("--authorize-cloudflare", action="store_true", help="启动后打开官方浏览器授权，自动配置启用人类验证的网站")
     sub.add_parser("status")
     sub.add_parser("setup-admin")
     credential = sub.add_parser("configure-secret")
@@ -121,7 +124,7 @@ def main():
         lock = acquire_runtime(service.store.root) if args.command != "status" else None
         try:
             if args.command == "serve":
-                serve(service, args.open_browser)
+                serve(service, args.open_browser, args.authorize_cloudflare)
                 return 0
             if args.command == "setup-admin":
                 if service.store.get("admin"):
