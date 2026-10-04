@@ -451,7 +451,7 @@ class Service:
         return result
 
     def sites(self):
-        return self.store.get("sites", [])
+        return [dict(site, protocols=site.get("protocols", ["http", "websocket"])) for site in self.store.get("sites", [])]
 
     def cloudflare_setup(self):
         cfg = self.settings()
@@ -483,6 +483,8 @@ class Service:
                 raise ValueError("网站 ID 不存在")
             if old and "paused" not in body:
                 site["paused"] = old.get("paused", False)
+            if old and "protocols" not in body:
+                site["protocols"] = old.get("protocols", ["http", "websocket"])
             if old and old["hostname"] != site["hostname"]:
                 raise ValueError("已有网站不可更改域名，请停用旧网站后新建")
             site["id"] = site["id"] or secrets.token_hex(8)
