@@ -51,4 +51,4 @@
 
 #token-manager-form{scroll-margin-top:24px}.permission-alert .button-row{align-items:center}.permission-alert .button-row button{white-space:normal;text-align:left}
 
-.brand-purpose{margin:8px 0 0 44px;color:var(--muted);font-size:11px;line-height:1.8;white-space:nowrap;flex-shrink:0}@media(max-width:760px){.brand-purpose{margin-left:44px;font-size:11px}}
+.sidebar-brand{gap:10px;letter-spacing:0}.sidebar-brand .brand-mark{width:40px;height:40px;flex:0 0 40px}.brand-copy{min-width:0;display:flex;flex-direction:column;gap:4px}.brand-copy strong{font-size:21px;line-height:1.2;letter-spacing:-.6px}.brand-purpose{margin:0;color:var(--muted);font-size:10.5px;line-height:1.4;letter-spacing:0;white-space:nowrap}
