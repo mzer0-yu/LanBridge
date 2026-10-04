@@ -1,4 +1,4 @@
-"""Provision only LanBridge-owned user API tokens using a separate authority."""
+"""Provision scoped tokens or explicitly repair the configured user's token."""
 from __future__ import annotations
 
 import json
@@ -36,7 +36,7 @@ class TokenManager:
             raise RuntimeError("Cloudflare 令牌管理网络异常；若创建结果未知，请按页面提示核对，勿重复创建。") from None
 
     @staticmethod
-    def policies(groups, cfg, human_check):
+    def policies(groups, cfg, human_check, target="write"):
         if not isinstance(groups, list) or any(not isinstance(g, dict) for g in groups):
             raise ValueError("Cloudflare 权限列表格式异常；未创建或修改令牌。")
         def group(names, scope):
@@ -46,42 +46,65 @@ class TokenManager:
                     return {"id": matches[0]["id"]}
             raise ValueError("Cloudflare 未提供所需权限：" + names[0] + "；未创建或修改令牌。")
         account_scope, zone_scope = "com.cloudflare.api.account", "com.cloudflare.api.account.zone"
-        account = [group(["Cloudflare Tunnel Write", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connectors Write"], account_scope)]
-        if human_check:
+        account = [group(["Cloudflare Tunnel Read", "Cloudflare One Connector: cloudflared Read", "Cloudflare One Connectors Read"] if target == "read" else ["Cloudflare Tunnel Write", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connectors Write"], account_scope)]
+        if human_check and target == "write":
             account.append(group(["Turnstile Write", "Turnstile Edit"], account_scope))
-        zone = [group(["DNS Write", "DNS Edit"], zone_scope), group(["Zone Read"], zone_scope)]
+        zone = [group(["DNS Read"] if target == "read" else ["DNS Write", "DNS Edit"], zone_scope), group(["Zone Read"], zone_scope)]
         return [
             {"effect": "allow", "permission_groups": account, "resources": {account_scope + "." + cfg["account_id"]: "*"}},
             {"effect": "allow", "permission_groups": zone, "resources": {zone_scope + "." + cfg["zone_id"]: "*"}},
         ]
 
-    def provision(self, authority="", remember=False, human_check=True):
+    def provision(self, authority="", remember=False, human_check=True, target="write", repair_existing=False):
         with self.service.lock:
+            if target not in ("write", "read") or not isinstance(repair_existing, bool):
+                raise ValueError("令牌类型或修复选项无效")
             store = self.service.store
             cfg = self.service.settings()
+            credential = "cf_" + target + "_token"
+            record_key = "managed_read_token" if target == "read" else "managed_business_token"
+            pending_key = "pending_read_token" if target == "read" else "pending_business_token"
             if not all(re.fullmatch(r"[a-fA-F0-9]{32}", cfg[k]) for k in ("account_id", "zone_id")) or not cfg["zone_name"]:
                 raise ValueError("请先保存 Account ID、Zone ID 和 Zone 名称。")
             authority = authority.strip() or store.secret("cf_token_authority")
             if not 10 <= len(authority) <= 4096:
                 raise ValueError("请提供 API Tokens Write 授权令牌。")
             groups = self.request(authority, "GET", "/user/tokens/permission_groups")
-            policies = self.policies(groups, cfg, human_check)
-            owned = store.get("managed_business_token")
+            policies = self.policies(groups, cfg, human_check, target)
+            owned = store.get(record_key)
+            if repair_existing:
+                current = store.secret(credential)
+                if not current:
+                    raise ValueError("未保存当前令牌，请先保存令牌或选择自动创建")
+                if current == authority:
+                    raise ValueError("授权令牌与业务令牌相同，请使用独立的 API Tokens Write 授权令牌")
+                verified = self.request(current, "GET", "/user/tokens/verify")
+                if not isinstance(verified, dict) or not isinstance(verified.get("id"), str) or not re.fullmatch(r"[a-fA-F0-9]{32}", verified["id"]):
+                    raise ValueError("无法核对当前用户令牌 ID，未修改任何令牌；请创建新令牌或检查有效期、IP 限制")
+                from .service import digest
+                owned = {"id": verified["id"], "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "credential_digest": digest(current), "external": True}
             if owned:
                 if owned["account_id"] != cfg["account_id"] or owned["zone_id"] != cfg["zone_id"]:
                     raise ValueError("托管令牌绑定的账户或域名已变化，请先使用手动配置切换业务令牌。")
                 # Verify the local credential is still the token we created before updating it.
                 from .service import digest
                 if owned.get("credential_digest"):
-                    if owned["credential_digest"] != digest(store.secret("cf_write_token")):
+                    if owned["credential_digest"] != digest(store.secret(credential)):
                         raise ValueError("当前业务令牌与托管记录不一致，未修改远端令牌。")
                 else:
-                    verified = self.request(store.secret("cf_write_token"), "GET", "/user/tokens/verify")
+                    verified = self.request(store.secret(credential), "GET", "/user/tokens/verify")
                     if not isinstance(verified, dict) or verified.get("id") != owned["id"]:
                         raise ValueError("当前业务令牌与托管记录不一致，未修改远端令牌。")
                 remote = self.request(authority, "GET", "/user/tokens/" + owned["id"])
                 if not isinstance(remote, dict) or remote.get("id") != owned["id"]:
                     raise ValueError("当前业务令牌与托管记录不一致，未修改远端令牌。")
+                if owned.get("external"):
+                    existing = remote.get("policies")
+                    if not isinstance(existing, list) or any(not isinstance(p, dict) for p in existing):
+                        raise ValueError("无法读取原令牌权限，未修改令牌")
+                    # Preserve every original policy, including denies and other resources.
+                    policies = existing + [p for p in policies if not any(e.get("effect") == "allow" and e.get("resources") == p["resources"] and {g["id"] for g in p["permission_groups"]}.issubset({g.get("id") for g in e.get("permission_groups", []) if isinstance(g, dict)}) for e in existing)]
+                owned["name"] = remote.get("name") or owned.get("name") or "LanBridge-" + target
                 body = {"name": owned["name"], "policies": policies}
                 for key in ("condition", "expires_on", "not_before", "status"):
                     if remote.get(key) is not None:
@@ -92,33 +115,33 @@ class TokenManager:
                     raise RuntimeError("Cloudflare 返回的令牌 ID 不匹配，未更新本机记录。")
                 action = "updated"
             else:
-                pending = store.get("pending_business_token")
+                pending = store.get(pending_key)
                 if pending:
                     raise ValueError("先前创建结果未知，请在 Cloudflare 核对令牌名称 " + pending["name"] + "；已有令牌可通过手动配置接入，平台不会重复创建。")
-                name = "LanBridge-" + secrets.token_hex(8)
-                store.set("pending_business_token", {"name": name, "requested_at": time.time()})
+                name = "LanBridge-" + target + "-" + secrets.token_hex(8)
+                store.set(pending_key, {"name": name, "requested_at": time.time()})
                 try:
                     result = self.request(authority, "POST", "/user/tokens", {"name": name, "policies": policies})
                 except RuntimeError as exc:
                     if re.search(r"HTTP 4\d\d", str(exc)):
-                        store.set("pending_business_token", None)
+                        store.set(pending_key, None)
                     raise
                 if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not re.fullmatch(r"[a-fA-F0-9]{32}", result["id"]) or not isinstance(result.get("value"), str) or not 10 <= len(result["value"]) <= 4096:
                     raise RuntimeError("Cloudflare 未返回完整令牌，创建结果需在 Cloudflare 核对。")
                 from .service import digest
                 owned = {"id": result["id"], "name": name, "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "credential_digest": digest(result["value"])}
                 action = "created"
-            owned = owned | {"human_check": human_check, "updated_at": time.time()}
+            owned = owned | {"human_check": human_check if target == "write" else False, "updated_at": time.time()}
             # Credential and ownership record commit together; no token secrets in API results.
             with store.lock, store.db:
                 if action == "created":
-                    store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", ("cf_write_token", store.cipher.encrypt(result["value"].encode()).decode()))
+                    store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (credential, store.cipher.encrypt(result["value"].encode()).decode()))
                 if remember:
                     store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", ("cf_token_authority", store.cipher.encrypt(authority.encode()).decode()))
-                store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("managed_business_token", json.dumps(owned)))
-                store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("pending_business_token", "null"))
-                changed = store.get("credential_updated_at", {}) | {"cf_write_token": time.time()}
+                store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (record_key, json.dumps(owned)))
+                store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (pending_key, "null"))
+                changed = store.get("credential_updated_at", {}) | {credential: time.time()}
                 store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("credential_updated_at", json.dumps(changed)))
-            store.audit("business_token_" + action, {"id": owned["id"], "human_check": human_check})
+            store.audit(("read_token_" if target == "read" else "business_token_") + action, {"id": owned["id"], "human_check": owned["human_check"], "repair_existing": repair_existing})
             store.set("token_management_error", None)
-            return {"action": action, "id": owned["id"], "saved": True, "human_check": human_check}
+            return {"action": action, "id": owned["id"], "saved": True, "human_check": owned["human_check"], "target": target, "repair_existing": repair_existing}

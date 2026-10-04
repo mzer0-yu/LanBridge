@@ -158,6 +158,13 @@ function renderTokenManager(){
   $('#token-manager-submit').disabled=!ready||!!management.pending||!!$('#token-manager-form').dataset.busy||!!$('#token-manager-submit').dataset.busy;
   if(management.managed&&!$('#token-manager-form').dataset.dirty)$('#token-manager-form [name=human_check]').checked=management.managed.human_check;
   $('#token-manager-submit').textContent=management.managed?'自动更新业务令牌权限':'自动创建并保存业务令牌';
+  const busy=!!$('#token-manager-form').dataset.busy;
+  $('#token-create-read').disabled=!ready||busy||!!management.pending_read;
+  $('#token-create-read').textContent=management.managed_read?'更新托管只读令牌权限':'创建并保存只读令牌';
+  $('#token-repair-read').disabled=!ready||busy||!state.credentials.cf_read_token;
+  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token;
+  $('#token-manager-forget').disabled=busy;
+  $('#read-manager-status').textContent=management.pending_read?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending_read.name+'；平台不会重复创建。':management.managed_read?'只读令牌已托管，可自动更新权限。':state.credentials.cf_read_token?'只读令牌已保存，可选择修复当前权限。':'未配置只读令牌；创建后读取操作会使用它。';
   $('#token-manager-forget').hidden=!management.authority_saved;
   $('#token-manager-form [name=authority]').placeholder=management.authority_saved?'授权令牌已加密保存；留空使用已保存授权':'粘贴授权令牌，仅用于令牌管理';
   $('#token-manager-status').textContent=management.pending?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending.name+'；通过下方手动配置接入已有令牌。':!ready?'请先保存左侧的 Account ID、Zone ID 和 Zone 名称。':management.managed?'业务令牌已托管 · '+cfg.zone_name+(management.authority_saved?'；授权令牌已加密保存。':'；再次更新需提供授权令牌。'):management.authority_saved?'授权令牌已加密保存，可自动创建业务令牌。':'账户和域名已准备好，请提供授权令牌。';
@@ -167,10 +174,12 @@ $('#token-manager-form').onsubmit=async e=>{
   if(form.dataset.busy)return;
   const authority=form.elements.authority.value.trim();
   if(!authority&&!state.token_management?.authority_saved){feedback.textContent='请先粘贴 API Tokens Write 授权令牌。';form.elements.authority.focus();return;}
-  form.dataset.busy='true';feedback.className='form-feedback';feedback.textContent='正在读取权限并配置业务令牌，请稍候…';
-  try{const result=await action(e.submitter,'cloudflare/provision-token',null,{authority,remember:form.elements.remember.checked,human_check:form.elements.human_check.checked});form.elements.authority.value='';form.dataset.dirty='';replacingWriteToken=false;invalidatePlan();renderSetup();renderTokenManager();feedback.textContent=result.action==='created'?'业务令牌已自动创建并加密保存。可前往连接器创建 Tunnel。':'业务令牌权限已更新。请重试此前失败的操作。';}
+  const button=e.submitter||$('#token-manager-submit'),target=button.dataset.target||'write',repair_existing=button.dataset.repair==='true';
+  const data={authority,remember:form.elements.remember.checked,human_check:form.elements.human_check.checked,target,repair_existing};
+  form.dataset.busy='true';lockForm(form);renderTokenManager();feedback.className='form-feedback';feedback.textContent='正在核对并配置'+(target==='read'?'只读':'写入')+'令牌，请稍候…';
+  try{const result=await action(button,'cloudflare/provision-token',null,data);form.elements.authority.value='';form.dataset.dirty='';replacingWriteToken=false;invalidatePlan();if(state){renderSetup();renderTokenManager();}const name=target==='read'?'只读令牌':'写入令牌';feedback.textContent=result.action==='created'?name+'已创建并加密保存。':name+'权限已更新，原令牌值和限制已保留。请重试此前失败的操作核验权限。';}
   catch(err){form.elements.authority.value='';feedback.className='form-feedback error';feedback.textContent=err.message;await loadState().catch(()=>{});}
-  finally{form.dataset.busy='';renderTokenManager();}
+  finally{form.dataset.busy='';unlockForm(form);if(state)renderTokenManager();}
 };
 $('#token-manager-forget').onclick=async e=>{try{await action(e.currentTarget,'cloudflare/forget-token-authority');$('#token-manager-feedback').textContent='本机授权令牌已移除，业务令牌仍可使用。';}catch(err){$('#token-manager-feedback').textContent=err.message;}};
 
@@ -209,6 +218,7 @@ function navigationIssues(current){
   }
   if(current.token_management?.error)issues.settings.push(current.token_management.error.detail);
   if(current.token_management?.pending)issues.settings.push('业务令牌创建结果未知，请在 Cloudflare 核对后接入，勿重复创建');
+  if(current.token_management?.pending_read)issues.settings.push('只读令牌创建结果未知，请在 Cloudflare 核对后接入，勿重复创建');
   const readiness=connectorReadiness(current);
   if(readiness.kind==='warning')issues.connector.push(readiness.detail);
   const humanSites=enabled.filter(site=>site.human_check&&(current.published_hosts||[]).includes(site.hostname));
@@ -242,7 +252,7 @@ function renderNavigationIssues(){
       button.title=reasons.length?[...new Set(reasons)].join('；'):readiness.detail;
     }else{
       const recheck=view==='settings'&&!reasons.length&&(state.cloudflare_permission_issues||[]).some(issue=>issue.status==='needs_recheck');
-      const permissions=view==='settings'&&state.cloudflare_setup?.ready&&!state.token_management?.error&&!state.token_management?.pending&&(state.cloudflare_permission_issues||[]).length>0;
+      const permissions=view==='settings'&&state.cloudflare_setup?.ready&&!state.token_management?.error&&!state.token_management?.pending&&!state.token_management?.pending_read&&(state.cloudflare_permission_issues||[]).length>0;
       badge.textContent=permissions?'权限待核验':recheck?'待核验':'待处理';badge.className='nav-status '+(recheck?'neutral':'warning');
       badge.hidden=view==='overview'||(!reasons.length&&!recheck);
       button.title=reasons.length&&view!=='overview'?[...new Set(reasons)].join('；'):recheck?'凭据已更新，请重试原操作核验权限':'';

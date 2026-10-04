@@ -46,3 +46,5 @@
   aside>.workspace{margin:18px 0 15px}
   nav button{padding-top:5px;padding-bottom:5px;min-height:48px}
 }
+
+.token-operation-group{border-top:1px solid var(--line);padding-top:16px;margin-top:18px}.token-operation-group h3{font-size:14px}.token-operation-group .button-row button{white-space:normal;text-align:left}.token-operation-group .button-row{align-items:stretch}

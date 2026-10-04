@@ -157,10 +157,14 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 
 输入授权令牌后，平台从 API 获取权限组 ID，自动创建限定当前 Account ID 的 Tunnel Write 和限定当前 Zone ID 的 DNS Write、Zone Read 业务令牌；可选择 Turnstile Write。业务令牌加密保存，不返回页面。授权令牌默认仅用于本次请求，勾选记住后独立加密保存，也可从界面移除本机副本。授权令牌可管理用户 API 令牌，应妥善保管。
 
-再次点击自动配置会更新平台自己创建且与本机凭据匹配的托管令牌，不修改其他手动令牌。手动替换业务令牌会解除托管。创建结果未知时阻止重复 POST，页面展示唯一名称供核对；可通过手动配置接入已有令牌。移除本机授权不撤销 Cloudflare 中的令牌。
+写入和只读令牌分别管理。只读令牌自动创建 Tunnel Read、DNS Read 和 Zone Read 权限，限定当前账户及 Zone，不改变写入令牌。再次点击创建入口会更新该类型已经托管的令牌。新建会替换本机使用的凭据，旧令牌不会从 Cloudflare 删除。
 
-- CLI：`run.py provision-token`，通过隐藏提示输入授权；`--remember` 保存授权，`--without-turnstile` 不授予 Turnstile。CLI 写操作要求先停止管理服务。
-- API：`POST /api/cloudflare/provision-token`，需要管理员会话、Origin 和 CSRF；字段 `authority`、`remember`、`human_check`。`POST /api/cloudflare/forget-token-authority` 移除本机授权。
-- MCP：`lanbridge_provision_token`，仅使用管理台已加密保存的授权，可传 `human_check`，不接受令牌文本。
+“修复当前写入/只读令牌权限”用于已经保存的用户令牌：先用该令牌验证 ID，再由授权令牌读取远端详情，新增当前账户及 Zone 所需权限，保留原有权限（包括拒绝策略）、名称、有效期、生效时间、IP 条件和状态，不更换令牌值。它不会移除原有写权限来强制变成纯只读。无法验证、账户令牌、其他用户令牌或无法读取权限时停止操作；可改用创建新令牌。有效期、IP 限制或原有拒绝策略造成的失败不会自动解除，更新后请重试业务操作核验。
+
+手动替换或移除凭据会解除对应托管。两种令牌分别记录未知创建结果并阻止重复 POST，页面展示唯一名称供核对；可通过手动配置接入已有令牌。移除本机授权不撤销 Cloudflare 中的令牌。
+
+- CLI：`run.py provision-token`，通过隐藏提示输入授权；`--target read` 配置只读令牌，默认 write；`--repair-existing` 修复对应的当前令牌；`--remember` 保存授权，`--without-turnstile` 不授予 Turnstile。CLI 写操作要求先停止管理服务。
+- API：`POST /api/cloudflare/provision-token`，需要管理员会话、Origin 和 CSRF；字段 `authority`、`remember`、`human_check`、`target`（write/read）、`repair_existing`（默认 false）。`POST /api/cloudflare/forget-token-authority` 移除本机授权。
+- MCP：`lanbridge_provision_token`，仅使用管理台已加密保存的授权，可传 `human_check`、`target`、`repair_existing`，不接受令牌文本。
 
 参考：https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/
