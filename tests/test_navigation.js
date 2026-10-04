@@ -181,7 +181,7 @@ test('browser connection has no mandatory authority-token fallback',()=>{
   const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
   assert(!html.includes('id="browser-auth-fallback"'));
   assert(!source.includes("$('#browser-auth-fallback')"));
-  const browserPanel=html.slice(html.indexOf('class="browser-auth-panel"'),html.indexOf('<h3>高级：'));
+  const browserPanel=html.slice(html.indexOf('class="browser-auth-panel"'),html.indexOf('<details id="advanced-token-management"'));
   assert(browserPanel.includes('id="browser-authorize"'));
   assert(!browserPanel.includes('name="authority"'));
 });
@@ -253,4 +253,24 @@ test('verification setup lists only enabled protected domains and leaves policie
   assert(!nodes['#widget-scope'].textContent.includes('public.example.com'));
   assert(!nodes['#widget-scope'].textContent.includes('disabled.example.com'));
   assert.equal(nodes['#widget-create'].hidden,true);assert.equal(JSON.stringify(current),before);
+});
+
+
+test('shortcuts reveal optional credential sections before focusing their fields',()=>{
+  const context={};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function revealControl('),source.indexOf('function updateSiteControls(')),context);
+  const outer={tagName:'DETAILS',open:false,parentElement:null};
+  const inner={tagName:'DETAILS',open:false,parentElement:outer};
+  context.revealControl({parentElement:{tagName:'DIV',parentElement:inner}});
+  assert.equal(inner.open,true);assert.equal(outer.open,true);
+});
+
+test('site editor shows passcode only when enabled and avoids revalidation warning for public sites',()=>{
+  const form={elements:{id:{value:'existing'},human_check:{checked:false},passcode_required:{checked:false}}};
+  const nodes={'#site-form':form,'#site-passcode-field':{},'#policy-save-hint':{}};
+  const context={$:key=>nodes[key]};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function updateSiteControls('),source.indexOf('function selectedProtocols(')),context);
+  context.updateSiteControls();assert.equal(nodes['#site-passcode-field'].hidden,true);assert.equal(nodes['#policy-save-hint'].hidden,true);
+  form.elements.passcode_required.checked=true;context.updateSiteControls();assert.equal(nodes['#site-passcode-field'].hidden,false);assert.equal(nodes['#policy-save-hint'].hidden,false);
+  form.elements.id.value='';context.updateSiteControls();assert.equal(nodes['#policy-save-hint'].hidden,true);
 });
