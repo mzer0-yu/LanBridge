@@ -62,10 +62,18 @@ def test_http_proxy_paths_binary_cookies_redirects(service, origin):
 
 def test_saved_origin_change_takes_effect_without_restarting_gateway(service, origin):
     class Replacement(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
+        protocol_version = "HTTP/1.0"
         def log_message(self, *args): pass
         def do_GET(self):
+            assert self.headers.get("Transfer-Encoding") is None
             body = b"replacement-origin"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def do_POST(self):
+            assert self.headers.get("Transfer-Encoding") is None
+            body = self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -79,6 +87,7 @@ def test_saved_origin_change_takes_effect_without_restarting_gateway(service, or
             assert client.get("/before").json()["host"] == f"127.0.0.1:{origin}"
             service.save_site(site | {"origin": f"http://127.0.0.1:{server.server_port}"})
             assert client.get("/after").content == b"replacement-origin"
+            assert client.post("/legacy-api", content=b"motor-command").content == b"motor-command"
     finally:
         server.shutdown()
         server.server_close()

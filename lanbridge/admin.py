@@ -5,7 +5,7 @@ import time
 
 import httpx
 from fastapi import FastAPI, Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.background import BackgroundTask
 from .gateway import Limiter
 from .models import Settings
@@ -20,6 +20,9 @@ def create_admin(service, shutdown=None):
     browser_auth = BrowserAuth(service)
     service.browser_auth = browser_auth
     limiter = Limiter()
+    from .local_login import COOKIE, LIFETIME, LocalLogin, open_browser
+    local_login = LocalLogin(service.store)
+    app.state.local_login = local_login
     ui = Path(__file__).resolve().parent.parent / "ui"
 
     @app.middleware("http")
@@ -33,7 +36,7 @@ def create_admin(service, shutdown=None):
             return JSONResponse({"detail": "管理台仅监听本机"}, 403)
         if request.method not in ("GET", "HEAD") and request.headers.get("origin") != "http://" + host:
             return JSONResponse({"detail": "请求来源校验失败"}, 403)
-        public = request.url.path in ("/", "/app.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login")
+        public = request.url.path in ("/", "/admin", "/admin/", "/client", "/client/", "/client.js", "/client.css", "/api/client/routes", "/app.js", "/local-login.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login", "/api/local-login/start", "/api/local-login/poll", "/api/local-login/cancel")
         session = service.store.session(request.cookies.get("lb_admin", ""))
         if not public and not session:
             return JSONResponse({"detail": "请登录管理员账户"}, 401)
@@ -70,7 +73,44 @@ def create_admin(service, shutdown=None):
 
     @app.get("/")
     def index():
+        return RedirectResponse("/client", status_code=307)
+
+    @app.get("/admin")
+    def admin_page():
         return FileResponse(ui / "index.html")
+
+    @app.get("/admin/")
+    def admin_slash():
+        return RedirectResponse("/admin", status_code=307)
+
+    @app.get("/client")
+    def client_page():
+        return FileResponse(ui / "client.html")
+
+    @app.get("/client/")
+    def client_slash():
+        return RedirectResponse("/client", status_code=307)
+
+    @app.get("/client.js")
+    def client_script():
+        return FileResponse(ui / "client.js")
+
+    @app.get("/client.css")
+    def client_style():
+        return FileResponse(ui / "client.css")
+
+    @app.get("/api/client/routes")
+    def client_routes():
+        with service.lock:
+            published = set(service.store.get("published_hosts", []))
+            with service.store.lock:
+                publication = service.store.db.execute("SELECT action FROM audit WHERE action IN ('publish_verified','publish_incomplete') ORDER BY id DESC LIMIT 1").fetchone()
+            review = bool(publication and publication[0] == "publish_incomplete")
+            routes = [{"name": site["name"], "hostname": site["hostname"], "origin": site["origin"],
+                       "published": site["hostname"] in published,
+                       "status": "已暂停" if site.get("paused") else "未发布" if site["hostname"] not in published else "待核验" if review else "已发布"}
+                      for site in service.sites() if site["enabled"]]
+            return {"routes": routes, "updated_at": time.time()}
 
     @app.get("/app.js")
     def script():
@@ -79,6 +119,10 @@ def create_admin(service, shutdown=None):
     @app.get("/style.css")
     def style():
         return FileResponse(ui / "style.css")
+
+    @app.get("/local-login.js")
+    def local_login_script():
+        return FileResponse(ui / "local-login.js")
 
     @app.get("/favicon.svg")
     def favicon():
@@ -123,6 +167,44 @@ def create_admin(service, shutdown=None):
         response.delete_cookie("lb_admin")
         return response
 
+    @app.post("/api/local-login/start")
+    async def start_local_login(request: Request):
+        import asyncio
+        if not service.store.get("admin"):
+            raise ValueError("请先创建管理员账户")
+        if not limiter.allow("local_login_start", 10):
+            return JSONResponse({"detail": "请求过于频繁，请稍后重试"}, 429)
+        request_id, proof, details = local_login.start(request.cookies.get(COOKIE, ""))
+        url = f'http://127.0.0.1:{service.settings()["admin_port"]}/admin#local-login={request_id}'
+        opened = await asyncio.to_thread(open_browser, url)
+        response = JSONResponse(details | {"request_id": request_id, "approval_url": url, "browser_opened": opened})
+        response.set_cookie(COOKIE, proof, httponly=True, samesite="strict", max_age=LIFETIME, path="/api/local-login")
+        return response
+
+    @app.post("/api/local-login/poll")
+    @app.post("/api/local-login/cancel")
+    async def poll_local_login(request: Request):
+        data = await body(request)
+        result, token = local_login.poll(str(data.get("request_id", "")), request.cookies.get(COOKIE, ""), request.url.path.endswith("/cancel"))
+        response = JSONResponse(result)
+        if token:
+            response.set_cookie("lb_admin", token, httponly=True, samesite="strict", max_age=28800)
+        if result["phase"] != "pending":
+            response.delete_cookie(COOKIE, path="/api/local-login")
+        return response
+
+    @app.get("/api/local-login/request/{request_id}")
+    def local_login_request(request_id: str):
+        return local_login.details(request_id)
+
+    @app.post("/api/local-login/approve")
+    async def approve_local_login(request: Request):
+        data = await body(request)
+        if not isinstance(data.get("allow"), bool):
+            raise ValueError("请选择允许或拒绝")
+        local_login.decide(str(data.get("request_id", "")), data.get("code", ""), data["allow"])
+        return {"approved": data["allow"]}
+
     @app.post("/api/shutdown")
     def shutdown_platform():
         if shutdown is None:
@@ -155,6 +237,7 @@ def create_admin(service, shutdown=None):
         if managed_read:
             managed_read = {k: v for k, v in managed_read.items() if k != "credential_digest"}
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+                "tunnel_pending": bool(service.store.get("pending_tunnel_create")),
                 "published_hosts": service.store.get("published_hosts", []),
                 "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
                 "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
@@ -250,6 +333,12 @@ def create_admin(service, shutdown=None):
         result["origin"] = site["origin"]
         service.store.set("probe_" + site_id, result)
         return result
+
+    @app.post("/api/sites/{site_id}/pause")
+    async def pause_site(site_id: str, request: Request):
+        import asyncio
+        data = await body(request)
+        return await asyncio.to_thread(service.set_site_paused, site_id, data.get("paused"))
 
     @app.post("/api/cloudflare/{action}")
     async def cloudflare(action: str, request: Request):
