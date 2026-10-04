@@ -102,7 +102,7 @@ function invalidatePlan(){plan=null;$('#plan-content').hidden=true;$('#plan-empt
 function editSite(id){if(!state)return;if(!id&&!state.cloudflare_setup?.ready){locateSetup();toast(setupMessage(),true);return;}const site=state.sites.find(s=>s.id===id);const form=$('#site-form');form.reset();form.elements.id.value='';form.elements.hostname.readOnly=false;$('#site-error').textContent='';$('#site-dialog-title').textContent=site?'编辑网站与策略':'添加网站';if(site){for(const el of form.elements){if(!el.name||el.name==='passcode')continue;const v=site[el.name];if(el.type==='checkbox')el.checked=!!v;else el.value=Array.isArray(v)?v.join(', '):v??'';}form.elements.hostname.readOnly=true;}$('#site-dialog').showModal();}
 async function action(button,path,message,data={}){if(button.dataset.busy)throw Error('操作正在进行，请稍候');button.dataset.busy='true';button.disabled=true;try{const result=await api(path,data);if(state){for(const key of ['settings','credentials','cloudflare_setup','cloudflare_permission_issues'])if(result[key])state[key]=result[key];}if(message)toast(message);try{await loadState()}catch{if(state)render();toast('操作已完成，但状态刷新失败。请刷新状态，勿重复提交。',true)}return result}catch(e){toast(e.message,true);await loadState().catch(()=>{});throw e}finally{button.dataset.busy='';button.disabled=false;if(state)renderActionAvailability();}}
 $('#auth-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('#auth-submit');button.disabled=true;$('#auth-error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));if(!initialized){await api('setup',data);initialized=true;}const result=await api('login',data);csrf=result.csrf;e.target.elements.password.value='';openShell();}catch(err){$('#auth-error').textContent=err.message}finally{button.disabled=false}});
-document.addEventListener('click',async e=>{const el=e.target.closest('button');if(!el)return;if(el.dataset.copy){try{await navigator.clipboard.writeText($('#'+el.dataset.copy).textContent);toast('已复制，请按说明调整项目路径或账号')}catch{toast('复制失败，请手动选择示例内容复制',true)}}if(el.dataset.addSite){el.disabled=true;try{await $('#add-site').onclick()}finally{el.disabled=false}}if(el.dataset.view)go(el.dataset.view);if(el.dataset.goto)go(el.dataset.goto);if(el.dataset.setup)locateSetup(el.dataset.setup);if(el.dataset.tokenStep!==undefined)setTokenStep(Number(el.dataset.tokenStep));if(el.dataset.edit)editSite(el.dataset.edit);if(el.dataset.probe){try{const r=await action(el,'sites/'+el.dataset.probe+'/probe');toast(r.reachable?'源站可达 · HTTP '+r.http_status:'局域网源站暂不可达',!r.reachable)}catch{}}});
+document.addEventListener('click',async e=>{const el=e.target.closest('button');if(!el)return;if(el.dataset.copy){try{await navigator.clipboard.writeText($('#'+el.dataset.copy).textContent);toast('已复制，请按说明调整项目路径或账号')}catch{toast('复制失败，请手动选择示例内容复制',true)}}if(el.dataset.addSite){el.disabled=true;try{await $('#add-site').onclick()}finally{el.disabled=false}}if(el.dataset.view)go(el.dataset.view);if(el.dataset.goto)go(el.dataset.goto);if(el.dataset.setup)locateSetup(el.dataset.setup);if(el.dataset.tokenManager)locateTokenManager();if(el.dataset.tokenStep!==undefined)setTokenStep(Number(el.dataset.tokenStep));if(el.dataset.edit)editSite(el.dataset.edit);if(el.dataset.probe){try{const r=await action(el,'sites/'+el.dataset.probe+'/probe');toast(r.reachable?'源站可达 · HTTP '+r.http_status:'局域网源站暂不可达',!r.reachable)}catch{}}});
 $('#add-site').onclick=async()=>{const button=$('#add-site');button.disabled=true;try{await loadState();editSite();}catch(e){toast('无法检查配置，请刷新后重试：'+e.message,true)}finally{if(state)renderSetup();}};$('#close-dialog').onclick=$('#cancel-site').onclick=()=>$('#site-dialog').close();$('#refresh').onclick=()=>loadState().catch(e=>toast(e.message,true));
 $('#logout').onclick=async()=>{try{await api('logout',{});showAuth()}catch(e){toast(e.message,true)}};
 $('#shutdown').onclick=()=>{$('#shutdown-error').textContent='';$('#shutdown-dialog').showModal();};
@@ -150,6 +150,17 @@ function renderPermissionIssues(){
   $('#cloudflare-permission-details').innerHTML=issues.map(issue=>'<p>'+ (issue.status==='needs_recheck'?'凭据已更新，需重试原操作验证。上次记录：':'上次操作失败记录：')+esc(issue.detail)+'<br><small>上次失败：'+new Date(issue.checked_at*1000).toLocaleString('zh-CN')+'</small></p>').join('');
   $('#credentials-form [name=cf_write_token]').closest('label').classList.toggle('permission-field-error',issues.some(issue=>issue.credential==='cf_write_token'&&issue.status!=='needs_recheck'));
   $('#credentials-form [name=cf_read_token]').closest('label').classList.toggle('permission-field-error',issues.some(issue=>issue.credential==='cf_read_token'&&issue.status!=='needs_recheck'));
+}
+
+function locateTokenManager(){
+  go('settings');
+  const form=$('#token-manager-form'),feedback=$('#token-manager-feedback');
+  const readOnly=(state?.cloudflare_permission_issues||[]).length>0&&(state.cloudflare_permission_issues||[]).every(issue=>issue.credential==='cf_read_token');
+  const target=readOnly?'只读':'写入';
+  feedback.className='form-feedback';
+  feedback.textContent=(state?.token_management?.authority_saved?'授权令牌已加密保存，输入框可留空。':'请在“授权令牌”输入框粘贴 API Tokens Write 授权令牌。')+'选择“修复当前'+target+'令牌权限”，也可创建新的'+target+'令牌；操作完成后重试此前失败的请求。';
+  form.elements.authority.focus({preventScroll:true});
+  form.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
 function renderTokenManager(){
