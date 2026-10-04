@@ -232,7 +232,8 @@ def create_admin(service, shutdown=None):
 
     @app.post("/api/sites")
     async def sites(request: Request):
-        return service.save_site(await body(request))
+        import asyncio
+        return await asyncio.to_thread(service.save_site, await body(request), synchronize_verification=True)
 
     @app.post("/api/sites/{site_id}/probe")
     async def probe(site_id: str):

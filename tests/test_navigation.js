@@ -19,9 +19,20 @@ test('missing account configuration belongs only to settings; empty unused featu
   const state=ready();state.settings.tunnel_id='';state.connector.running=false;state.credentials.tunnel_token=false;state.cloudflare_setup={ready:false,missing:['API Token']};
   const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);
 });
-test('permission failure does not spread to mapping, security or history tabs',()=>{
+test('permission failure does not spread to website management or history tabs',()=>{
   const state=ready();state.cloudflare_permission_issues=[{detail:'Cloudflare API HTTP 403：创建 Tunnel失败'}];
   const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);
+});
+
+test('website publication status distinguishes pending publication, removal and verification',()=>{
+  const context={};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function publicationStatus('),source.indexOf('function table(')),context);
+  const site={hostname:'app.example.com',enabled:true},current={published_hosts:[]};
+  assert.equal(context.publicationStatus(site,current).label,'待发布');
+  current.published_hosts=[site.hostname];assert.equal(context.publicationStatus(site,current).label,'已发布');
+  current.publication_needs_review=true;assert.equal(context.publicationStatus(site,current).label,'待核验');
+  site.enabled=false;assert.equal(context.publicationStatus(site,current).label,'待停用');
+  current.published_hosts=[];assert.equal(context.publicationStatus(site,current).label,'已停用');
 });
 test('route changes and incomplete publication belong only to connector',()=>{
   const state=ready();state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:false}];state.publication_needs_review=true;
@@ -34,7 +45,7 @@ test('source warning is tied to the checked origin; changed or disabled sites re
 });
 test('only published enabled human-check sites report missing Turnstile credentials',()=>{
   const state=ready();state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:true}];state.published_hosts=['app.example.com'];state.credentials.turnstile_secret=false;
-  const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['security']);state.credentials.turnstile_secret=true;assert.deepEqual(Array.from(marked(context)),[]);
+  const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);state.credentials.turnstile_secret=true;assert.deepEqual(Array.from(marked(context)),[]);
 });
 test('connector badge resets after recovery and view changes; overview summary has no pending badge',()=>{
   const state=ready();state.publication_needs_review=true;
@@ -48,7 +59,7 @@ test('settings is the last list item without bottom anchoring',()=>{
 
 test('unpublished default human-check option is preparation, not a security failure',()=>{
   const state=ready();state.settings.tunnel_id='';state.settings.turnstile_sitekey='';state.credentials.turnstile_secret=false;state.credentials.tunnel_token=false;state.connector.running=false;state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:true}];
-  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#security-nav-status'].hidden,true);assert.deepEqual(Array.from(marked(context)),['connector']);
+  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.deepEqual(Array.from(marked(context)),['connector']);
 });
 
 test('a replaced credential is awaiting verification instead of a current permission failure',()=>{
@@ -113,7 +124,7 @@ test('browser shortcut opens settings and starts authorization; repair remains a
   const alert=html.slice(html.indexOf('id="cloudflare-permission-alert"'),html.indexOf('id="state-refresh-warning"'));
   assert(alert.includes('data-browser-authorize="true"'));
   assert(alert.includes('修复当前令牌权限'));
-  assert(alert.includes('无需再粘贴授权令牌'));
+  assert(alert.includes('data-token-manager="true"'));
   assert(!alert.includes('手动编辑 Cloudflare'));
 });
 
@@ -129,7 +140,7 @@ test('authorization progress shows the wait limit and expired callback recovery'
   const context={Date:{now:()=>1000000},Number,Math};vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function browserAuthMessage('),source.indexOf('function renderBrowserAuth(')),context);
   assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:940,message:'授权中'}),/60 秒/);
-  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/立即重新打开授权页或取消/);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新打开授权页或取消/);
   assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
 });
 
@@ -137,7 +148,9 @@ test('browser connection has no mandatory authority-token fallback',()=>{
   const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
   assert(!html.includes('id="browser-auth-fallback"'));
   assert(!source.includes("$('#browser-auth-fallback')"));
-  assert(html.includes('自动刷新凭据'));
+  const browserPanel=html.slice(html.indexOf('class="browser-auth-panel"'),html.indexOf('<h3>高级：'));
+  assert(browserPanel.includes('id="browser-authorize"'));
+  assert(!browserPanel.includes('name="authority"'));
 });
 
 
@@ -165,7 +178,7 @@ test('setup only offers adding the first website when none exists',()=>{
 });
 test('existing websites lead to the remaining verification or publishing step',()=>{
   const state=ready();state.sites=[{enabled:true,hostname:'app.example.com',human_check:true}];state.settings.turnstile_sitekey='';
-  assert.equal(progressHarness(state).next,'security');
+  assert.equal(progressHarness(state).next,'verification');
   state.settings.turnstile_sitekey='key';assert.equal(progressHarness(state).label,'发布网站映射 →');
   state.published_hosts=['app.example.com'];assert.equal(progressHarness(state).next,'sites');
   state.connector.running=false;assert.equal(progressHarness(state).label,'完成连接器配置 →');
@@ -189,4 +202,15 @@ test('overall setup progress appears only in overview, not account settings',()=
   const settings=html.match(/<section id="view-settings"[^>]*>(.*?)<\/section>/s)[1];
   assert(overview.includes('id="setup-progress"'));assert(overview.includes('id="setup-progress-add"'));
   assert(!settings.includes('setup-progress'));assert(settings.includes('Cloudflare 账户与域名'));
+});
+
+test('verification setup lists only enabled protected domains and leaves policies unchanged',()=>{
+  const nodes={};const context={$:selector=>nodes[selector]||=({})};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function renderHumanVerification('),source.indexOf('function renderCredentialsGuide(')),context);
+  const current={settings:{turnstile_sitekey:'public-key'},credentials:{turnstile_secret:true},sites:[{hostname:'protected.example.com',enabled:true,human_check:true},{hostname:'public.example.com',enabled:true,human_check:false},{hostname:'disabled.example.com',enabled:false,human_check:true}]};
+  const before=JSON.stringify(current);context.renderHumanVerification(current);
+  assert(nodes['#widget-scope'].textContent.includes('protected.example.com'));
+  assert(!nodes['#widget-scope'].textContent.includes('public.example.com'));
+  assert(!nodes['#widget-scope'].textContent.includes('disabled.example.com'));
+  assert.equal(nodes['#widget-create'].hidden,true);assert.equal(JSON.stringify(current),before);
 });

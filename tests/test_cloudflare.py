@@ -191,3 +191,39 @@ def test_widget_missing_secret_does_not_claim_configuration_complete(service,mon
     monkeypatch.setattr(service.cf,'request',request)
     with pytest.raises(RuntimeError,match='密钥'):service.cf.create_widget()
     assert not service.settings()['turnstile_sitekey'] and service.store.get('pending_widget_create')['sitekey']=='0x4-widget-site-key'
+
+
+def test_website_api_automatically_prepares_verification_and_disabling_is_local(service, monkeypatch):
+    from test_security import admin_client
+    widgets = []
+    calls = []
+    def request(method, path, body=None):
+        calls.append((method, path))
+        if '/zones/' in path:
+            return {"name": "example.com", "status": "active", "account": {"id": "a" * 32}}
+        if method == 'POST':
+            widgets.append(body | {"sitekey": "owned-widget", "secret": "private-widget-secret"})
+        elif method == 'PUT':
+            widgets[0].update(body)
+        return widgets[0]
+    monkeypatch.setattr(service.cf, 'request', request)
+    client = admin_client(service)
+    response = client.post('/api/sites', json={"name": "First", "hostname": "first.example.com", "origin": "http://127.0.0.1:9300", "human_check": True})
+    assert response.status_code == 200
+    first = response.json()
+    assert widgets[0]['domains'] == ['first.example.com']
+    assert service.store.secret('turnstile_secret') == 'private-widget-secret'
+    response = client.post('/api/sites', json={"name": "Second", "hostname": "second.example.com", "origin": "http://127.0.0.1:9301", "human_check": True})
+    assert response.status_code == 200
+    assert widgets[0]['domains'] == ['first.example.com', 'second.example.com']
+    # Removing the local requirement must work even while Cloudflare is unavailable.
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('Cloudflare unavailable')
+    monkeypatch.setattr(service.cf, 'request', unavailable)
+    response = client.post('/api/sites', json=first | {"human_check": False})
+    assert response.status_code == 200 and not response.json()['human_check']
+    disabled = response.json()
+    response = client.post('/api/sites', json=disabled | {"human_check": True, "origin": "http://127.0.0.1:9302"})
+    assert response.status_code == 400 and '未保存' in response.json()['detail']
+    assert next(s for s in service.sites() if s['id'] == first['id']) == disabled
+    assert sum(method == 'POST' for method, _ in calls) == 1

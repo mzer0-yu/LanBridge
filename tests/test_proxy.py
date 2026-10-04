@@ -60,6 +60,31 @@ def test_http_proxy_paths_binary_cookies_redirects(service, origin):
     assert client.get("/bytes").status_code == 404
 
 
+def test_saved_origin_change_takes_effect_without_restarting_gateway(service, origin):
+    class Replacement(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *args): pass
+        def do_GET(self):
+            body = b"replacement-origin"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Replacement)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        site = service.save_site({"name": "origin", "hostname": "app.example.com", "origin": f"http://127.0.0.1:{origin}", "human_check": False})
+        with TestClient(create_gateway(service), base_url="https://app.example.com") as client:
+            assert client.get("/before").json()["host"] == f"127.0.0.1:{origin}"
+            service.save_site(site | {"origin": f"http://127.0.0.1:{server.server_port}"})
+            assert client.get("/after").content == b"replacement-origin"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
 def test_websocket_proxy_requires_grant_and_relays(service):
     from websockets.asyncio.server import serve
     ready = threading.Event()
