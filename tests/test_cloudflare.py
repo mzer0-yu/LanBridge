@@ -47,6 +47,29 @@ def test_preview_preserves_unrelated_routes_and_apply_verifies(service, monkeypa
     assert all(method == "GET" for method, _, _ in calls)
 
 
+def test_first_publish_accepts_cloudflare_materialized_default_and_rejects_drift(service, monkeypatch):
+    remote, records, calls, site = prepare(service, monkeypatch)
+    remote["config"] = None
+    original = service.cf.request
+    drift = [False]
+    def request(method, path, body=None):
+        result = original(method, path, body)
+        if method == "PUT" and path.endswith("/configurations"):
+            remote["config"]["warp-routing"] = {"enabled": False}
+            if drift[0]:
+                remote["config"]["ingress"][0]["service"] = "http://127.0.0.1:9999"
+        return result
+    monkeypatch.setattr(service.cf, "request", request)
+    assert service.cf.apply(service.cf.plan()["revision"])["verified"]
+    assert service.store.get("published_hosts") == [site["hostname"]]
+    assert len(records) == 1
+    remote["config"] = None
+    drift[0] = True
+    with pytest.raises(RuntimeError, match="无法核验"):
+        service.cf.apply(service.cf.plan()["revision"])
+    assert len(records) == 1
+
+
 def test_apply_rejects_remote_and_local_drift(service, monkeypatch):
     remote, records, calls, site = prepare(service, monkeypatch)
     plan = service.cf.plan()

@@ -23,6 +23,16 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def tunnel_config_equal(actual, expected):
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual == expected
+    # Cloudflare materializes this default when the first config is written.
+    left, right = deepcopy(actual), deepcopy(expected)
+    left.setdefault("warp-routing", {"enabled": False})
+    right.setdefault("warp-routing", {"enabled": False})
+    return left == right
+
+
 def lan_address(host):
     try:
         addresses = [ipaddress.ip_address(host)]
@@ -325,7 +335,7 @@ class Cloudflare:
                 if latest["routes_changed"]:
                     self.request("PUT", self.tunnel_path() + "/configurations", {"config": latest["after"]})
                 actual = self.request("GET", self.tunnel_path() + "/configurations")
-                if actual.get("config") != latest["after"]:
+                if not tunnel_config_equal(actual.get("config"), latest["after"]):
                     raise RuntimeError("远端配置写后核验失败，请重新预览并检查远端")
                 for item in latest["dns"]:
                     rows = self.request("GET", f'/zones/{cfg["zone_id"]}/dns_records?name={item["hostname"]}')
