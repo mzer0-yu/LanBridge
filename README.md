@@ -168,3 +168,5 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 - MCP：`lanbridge_provision_token`，仅使用管理台已加密保存的授权，可传 `human_check`、`target`、`repair_existing`，不接受令牌文本。
 
 参考：https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/
+
+自动创建新令牌入口始终新建并加密保存，即使已有托管令牌；成功后切换本机凭据，旧令牌不会删除。API/MCP 使用 `force_new: true`，CLI 使用 `--force-new`；不可与 `repair_existing` 同时使用。创建结果未知时仍禁止重复创建。

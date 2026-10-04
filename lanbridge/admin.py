@@ -247,9 +247,9 @@ def create_admin(service, shutdown=None):
         data = await body(request)
         if action == "provision-token":
             from .token_manager import TokenManager
-            if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool) or data.get("target", "write") not in ("write", "read") or not isinstance(data.get("repair_existing", False), bool):
+            if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool) or data.get("target", "write") not in ("write", "read") or not isinstance(data.get("repair_existing", False), bool) or not isinstance(data.get("force_new", False), bool):
                 raise ValueError("授权令牌或选项格式无效")
-            return await asyncio.to_thread(TokenManager(service).provision, data.get("authority", ""), data.get("remember", False), data.get("human_check", True), data.get("target", "write"), data.get("repair_existing", False))
+            return await asyncio.to_thread(TokenManager(service).provision, data.get("authority", ""), data.get("remember", False), data.get("human_check", True), data.get("target", "write"), data.get("repair_existing", False), data.get("force_new", False))
         if action == "forget-token-authority":
             service.store.set_secret("cf_token_authority", "")
             return {"removed": True}

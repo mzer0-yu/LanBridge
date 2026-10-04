@@ -131,7 +131,10 @@ def test_management_endpoint_requires_auth_csrf_and_never_returns_token(manager,
     response = client.post("/api/cloudflare/provision-token", json=data, headers={"X-CSRF-Token": login.json()["csrf"]})
     assert response.status_code == 200 and "authority-token-secret-value" not in response.text
     assert len(calls) == 1
-    assert calls[0][-2:] == ("write", False)
+    assert calls[0][-3:] == ("write", False, False)
+    data["force_new"] = True
+    response = client.post("/api/cloudflare/provision-token", json=data, headers={"X-CSRF-Token": login.json()["csrf"]})
+    assert response.status_code == 200 and calls[-1][-3:] == ("write", False, True)
 
 
 def test_create_read_only_token_preserves_write_token_and_uses_no_write_permissions(manager, monkeypatch):
@@ -227,3 +230,35 @@ def test_unknown_read_token_creation_blocks_duplicates_independently(manager, mo
     assert sum(r.method == "POST" for r in calls) == 1
     assert manager.service.store.get("pending_read_token")
     assert manager.service.store.get("pending_business_token") is None
+
+
+@pytest.mark.parametrize("target", ["write", "read"])
+def test_force_new_replaces_managed_credential_without_modifying_old_token(manager, monkeypatch, target):
+    calls = []
+    ids = iter(["c" * 32, "d" * 32])
+    def respond(request):
+        calls.append(request)
+        if request.url.path.endswith("permission_groups"):
+            result = groups()
+        else:
+            assert request.method == "POST" and request.url.path.endswith("/user/tokens")
+            token_id = next(ids)
+            result = {"id": token_id, "value": "secret-" + token_id}
+        return httpx.Response(200, json={"success": True, "result": result})
+    mock_api(monkeypatch, respond)
+    manager.provision("authority-token-secret-value", target=target)
+    result = manager.provision("authority-token-secret-value", target=target, force_new=True)
+    assert result["action"] == "created" and result["id"] == "d" * 32
+    assert manager.service.store.secret("cf_" + target + "_token") == "secret-" + "d" * 32
+    assert len([r for r in calls if r.method == "POST"]) == 2
+    assert not any(r.method in ("PUT", "DELETE") for r in calls)
+    record_key = "managed_read_token" if target == "read" else "managed_business_token"
+    pending_key = "pending_read_token" if target == "read" else "pending_business_token"
+    original = manager.service.store.get(record_key)
+    manager.service.store.set(pending_key, {"name": "unknown-result"})
+    with pytest.raises(ValueError, match="先前创建结果未知"):
+        manager.provision("authority-token-secret-value", target=target, force_new=True)
+    assert manager.service.store.get(record_key) == original
+    assert len([r for r in calls if r.method == "POST"]) == 2
+    with pytest.raises(ValueError, match="选项无效"):
+        manager.provision("authority-token-secret-value", target=target, force_new=True, repair_existing=True)

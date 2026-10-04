@@ -103,6 +103,7 @@ def main():
     provision.add_argument("--without-turnstile", action="store_true")
     provision.add_argument("--target", choices=["write", "read"], default="write")
     provision.add_argument("--repair-existing", action="store_true")
+    provision.add_argument("--force-new", action="store_true", help="Create a new token even when one is managed")
     sub.add_parser("turnstile")
     sub.add_parser("preview")
     apply = sub.add_parser("apply")
@@ -160,7 +161,7 @@ def main():
             elif args.command == "provision-token":
                 from lanbridge.token_manager import TokenManager
                 authority = getpass.getpass("API Tokens Write 授权令牌（已有加密授权可留空）：")
-                result = TokenManager(service).provision(authority, args.remember, not args.without_turnstile, args.target, args.repair_existing)
+                result = TokenManager(service).provision(authority, args.remember, not args.without_turnstile, args.target, args.repair_existing, args.force_new)
             elif args.command == "turnstile":
                 result = service.cf.create_widget()
             elif args.command == "preview":

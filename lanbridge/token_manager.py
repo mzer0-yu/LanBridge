@@ -55,9 +55,9 @@ class TokenManager:
             {"effect": "allow", "permission_groups": zone, "resources": {zone_scope + "." + cfg["zone_id"]: "*"}},
         ]
 
-    def provision(self, authority="", remember=False, human_check=True, target="write", repair_existing=False):
+    def provision(self, authority="", remember=False, human_check=True, target="write", repair_existing=False, force_new=False):
         with self.service.lock:
-            if target not in ("write", "read") or not isinstance(repair_existing, bool):
+            if target not in ("write", "read") or not isinstance(repair_existing, bool) or not isinstance(force_new, bool) or (force_new and repair_existing):
                 raise ValueError("令牌类型或修复选项无效")
             store = self.service.store
             cfg = self.service.settings()
@@ -71,7 +71,7 @@ class TokenManager:
                 raise ValueError("请提供 API Tokens Write 授权令牌。")
             groups = self.request(authority, "GET", "/user/tokens/permission_groups")
             policies = self.policies(groups, cfg, human_check, target)
-            owned = store.get(record_key)
+            owned = None if force_new else store.get(record_key)
             if repair_existing:
                 current = store.secret(credential)
                 if not current:
