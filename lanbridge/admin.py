@@ -237,6 +237,7 @@ def create_admin(service, shutdown=None):
         if managed_read:
             managed_read = {k: v for k, v in managed_read.items() if k != "credential_digest"}
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+                "tunnel_pending": bool(service.store.get("pending_tunnel_create")),
                 "published_hosts": service.store.get("published_hosts", []),
                 "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
                 "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},

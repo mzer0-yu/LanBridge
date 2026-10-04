@@ -236,6 +236,9 @@ def create_gateway(service):
         headers += [("host", host), ("x-forwarded-host", site["hostname"]), ("x-forwarded-proto", "https"), ("x-forwarded-for", request.state.ip)]
         if cookies:
             headers.append(("cookie", cookies))
+        # Keep known body lengths; do not manufacture chunked uploads for bodyless requests.
+        if "content-length" in request.headers:
+            headers.append(("content-length", length))
         client = httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10), follow_redirects=False, trust_env=False)
         async def limited_body():
             size = 0
@@ -245,7 +248,8 @@ def create_gateway(service):
                     raise ValueError("body_too_large")
                 yield chunk
         try:
-            upstream = await client.send(client.build_request(request.method, target, headers=headers, content=limited_body(), extensions={"sni_hostname": sni}), stream=True)
+            has_body = int(length) > 0 or bool(request.headers.get("transfer-encoding"))
+            upstream = await client.send(client.build_request(request.method, target, headers=headers, content=limited_body() if has_body else None, extensions={"sni_hostname": sni}), stream=True)
         except ValueError:
             await client.aclose()
             return Response("请求内容过大", 413)

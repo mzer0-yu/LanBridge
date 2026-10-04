@@ -72,9 +72,9 @@ test('permission and missing tunnel badges name distinct actions and recover ind
   state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:false}];
   const {context,nodes}=harness(state);context.renderNavigationIssues();
   assert.equal(nodes['#settings-nav-status'].textContent,'权限待核验');assert.equal(nodes['#settings-nav-status'].hidden,false);
-  assert.equal(nodes['#connector-nav-status'].textContent,'待创建 Tunnel');
-  state.cloudflare_permission_issues=[];context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.equal(nodes['#connector-nav-status'].textContent,'待创建 Tunnel');
-  state.settings.tunnel_id='t';context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'待获取令牌');
+  assert.equal(nodes['#connector-nav-status'].textContent,'待创建隧道');
+  state.cloudflare_permission_issues=[];context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.equal(nodes['#connector-nav-status'].textContent,'待创建隧道');
+  state.settings.tunnel_id='t';context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'待获取连接令牌');
   state.credentials.tunnel_token=true;state.connector.installed=false;context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'待安装连接器');
   state.connector.installed=true;state.connector.running=true;state.published_hosts=['app.example.com'];context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'运行中');
 });
@@ -111,6 +111,25 @@ test('unavailable connector actions are disabled until prerequisites are met',()
 test('a running mutation cannot be submitted a second time',async()=>{
   let finish;let count=0;const context=asyncHarness({api:async(path)=>{if(path==='state')return ready();count++;return new Promise(resolve=>finish=resolve);}});const button={dataset:{},disabled:false};
   const first=context.action(button,'create-tunnel',null,{});await assert.rejects(context.action(button,'create-tunnel',null,{}),/正在进行/);finish({saved:true});await first;assert.equal(count,1);
+});
+
+test('tunnel actions distinguish creation, recovery, retrieval and completed configuration',()=>{
+  const state=ready();state.connector.running=false;state.settings.account_id='account';state.credentials.cf_write_token=true;
+  const {context,nodes}=harness(state);
+  state.settings.tunnel_id='';state.credentials.tunnel_token=false;context.renderActionAvailability();
+  assert.equal(nodes['#create-tunnel'].textContent,'创建隧道');assert.equal(nodes['#create-tunnel'].disabled,false);
+  state.tunnel_pending=true;context.renderActionAvailability();assert.equal(nodes['#create-tunnel'].textContent,'核对并恢复隧道');
+  state.settings.tunnel_id='existing';context.renderActionAvailability();assert.equal(nodes['#create-tunnel'].textContent,'获取连接令牌');
+  state.credentials.tunnel_token=true;context.renderActionAvailability();
+  assert.equal(nodes['#create-tunnel'].textContent,'隧道已配置');assert.equal(nodes['#create-tunnel'].disabled,true);
+  assert.equal(nodes['#tunnel-maintenance'].hidden,false);assert.equal(nodes['#tunnel-token-refresh'].disabled,false);
+});
+
+test('running connector is not mislabeled as unconfigured when management credentials are missing',()=>{
+  const state=ready();state.cloudflare_setup.ready=false;state.credentials.cf_write_token=false;
+  const {context,nodes}=harness(state);context.renderActionAvailability();
+  assert.equal(context.connectorReadiness(state).label,'运行中');
+  assert.equal(nodes['#connector-start'].textContent,'连接器运行中');assert.equal(nodes['#connector-start'].disabled,true);
 });
 
 test('browser shortcut opens settings and starts authorization; repair remains a separate action',async()=>{
@@ -174,7 +193,7 @@ function progressHarness(state){
 test('setup only offers adding the first website when none exists',()=>{
   const state=ready();assert.equal(progressHarness(state).next,'add');
   state.sites=[{enabled:true,hostname:'app.example.com',human_check:false}];state.settings.tunnel_id='';
-  const progress=progressHarness(state);assert.equal(progress.title,'已登记 1 个网站');assert.equal(progress.next,'connector');assert.equal(progress.label,'创建 Tunnel →');assert(!progress.detail.includes('登记公网域名'));
+  const progress=progressHarness(state);assert.equal(progress.title,'已登记 1 个网站');assert.equal(progress.next,'connector');assert.equal(progress.label,'创建隧道 →');assert(!progress.detail.includes('登记公网域名'));
 });
 test('existing websites lead to the remaining verification or publishing step',()=>{
   const state=ready();state.sites=[{enabled:true,hostname:'app.example.com',human_check:true}];state.settings.turnstile_sitekey='';
@@ -182,6 +201,13 @@ test('existing websites lead to the remaining verification or publishing step',(
   state.settings.turnstile_sitekey='key';assert.equal(progressHarness(state).label,'发布网站映射 →');
   state.published_hosts=['app.example.com'];assert.equal(progressHarness(state).next,'sites');
   state.connector.running=false;assert.equal(progressHarness(state).label,'完成连接器配置 →');
+});
+
+test('overview prioritizes missing connection token and uncertain tunnel recovery',()=>{
+  const state=ready();state.sites=[{enabled:true,hostname:'app.example.com',human_check:false}];state.credentials.tunnel_token=false;
+  assert.equal(progressHarness(state).label,'获取连接令牌 →');
+  state.settings.tunnel_id='';state.tunnel_pending=true;
+  assert.equal(progressHarness(state).label,'核对并恢复隧道 →');
 });
 test('disabled existing websites still lead to management rather than a new website dialog',()=>{
   const state=ready();state.sites=[{enabled:false,hostname:'app.example.com'}];

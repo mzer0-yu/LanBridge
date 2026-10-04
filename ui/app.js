@@ -4,7 +4,7 @@ let csrf = '', initialized = false, state = null, currentView = 'overview', plan
 const formLocks=new WeakMap();
 function lockForm(form){const saved=[...form.elements].map(el=>[el,el.disabled]);formLocks.set(form,saved);for(const [el] of saved)el.disabled=true;}
 function unlockForm(form){for(const [el,disabled] of formLocks.get(form)||[])el.disabled=disabled;formLocks.delete(form);}
-const titles = {interfaces:['调用方式','','调用方式'],overview:['总览','','总览'],sites:['网站管理','','网站管理'],connector:['连接器','','连接器'],audit:['操作审计','','操作审计'],settings:['账户与配置','','账户与配置']};
+const titles = {interfaces:['调用方式','','调用方式'],overview:['总览','','总览'],sites:['网站管理','','网站管理'],connector:['连接器','','连接器'],audit:['操作日志','','操作日志'],settings:['账户与配置','','账户与配置']};
 const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(message, error=false){clearTimeout(toastTimer);const el=$('#toast');el.textContent=message;el.className=error?'error':'';el.hidden=false;toastTimer=setTimeout(()=>el.hidden=true,6500)}
 async function api(path, data){const requestSession=csrf;const options=data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(data)};const r=await fetch('/api/'+path,options);let body;try{body=await r.json()}catch{throw Error('服务器暂不可用')}if(!r.ok){if(r.status===401&&path!=='login'&&requestSession===csrf)showAuth();throw Error(typeof body.detail==='string'?body.detail:'输入格式无效')}return body}
@@ -21,7 +21,7 @@ function publicationStatus(site,current){
   return {label:'已发布',kind:'success'};
 }
 function table(sites){if(!sites.length)return empty();return '<div class="table-wrap"><table><thead><tr><th>网站 / 公网域名</th><th>局域网源站</th><th>访问策略</th><th>发布状态</th><th>操作</th></tr></thead><tbody>'+sites.map(s=>`<tr><td><b>${esc(s.name)}</b><small><a href="https://${esc(s.hostname)}" target="_blank" rel="noreferrer">${esc(s.hostname)} ↗</a></small></td><td>${esc(s.origin)}</td><td>${s.human_check?'<span class="badge '+(state.settings.turnstile_sitekey&&state.credentials.turnstile_secret?'success':'warning')+'">人类验证'+(state.settings.turnstile_sitekey&&state.credentials.turnstile_secret?'':'待配置')+'</span> ':''}${s.passcode_required?'<span class="badge warning">口令</span>':!s.human_check?'<span class="badge neutral">公开访问</span>':''}<small>${s.allowed_countries.length?esc(s.allowed_countries.join(' · ')):'国家不限'} · ${s.requests_per_minute}/分钟</small></td><td><span class="badge ${publicationStatus(s,state).kind}">${publicationStatus(s,state).label}</span></td><td><button class="row-action" data-edit="${s.id}">编辑</button><button class="row-action" data-probe="${s.id}">探测</button></td></tr>`).join('')+'</tbody></table></div>'}
-function render(){if(!state)return;renderSetup();renderPermissionIssues();renderTokenManager();renderConnectorReadiness();renderNavigationIssues();renderActionAvailability();const sites=state.sites,cfg=state.settings,conn=state.connector,cf=state.cloudflare;$('#nav-count').textContent=sites.length;$('#stat-sites').textContent=sites.length;$('#stat-enabled').textContent=sites.filter(s=>s.enabled).length;$('#stat-human').textContent=sites.filter(s=>s.enabled&&s.human_check).length;const fresh=cf&&cf.tunnel_id===cfg.tunnel_id&&Date.now()/1000>=cf.checked_at&&(Date.now()/1000-cf.checked_at<150);$('#stat-edge').textContent=fresh?cf.connections:'—';$('#stat-edge-desc').textContent=cf?(fresh?'API 核验 · '+cf.edge_status:'上次核查已过期'):'尚未通过 API 核验';$('#flow-status').textContent=conn.running?'连接器已启动':'连接器未启动';$('#flow-status').className='badge '+(conn.running?'success':'neutral');$('#overview-sites').innerHTML=table(sites.slice(0,5));$('#sites-table').innerHTML=table(sites);$('#connector-status').textContent=conn.running?'运行中':conn.last_exit!=null?'已退出（'+conn.last_exit+'）':'未启动';$('#connector-status').className='badge '+(conn.running?'success':'neutral');$('#connector-path').textContent=cfg.cloudflared_path||(conn.installed?'已从 PATH 找到':'尚未找到 cloudflared.exe');$('#tunnel-id').textContent=cfg.tunnel_id||'尚未创建';$('#gateway-address').textContent='127.0.0.1:'+cfg.gateway_port;$('#edge-detail').textContent=cf?`边缘状态：${cf.edge_status} · 连接数：${cf.connections} · 核查时间：${new Date(cf.checked_at*1000).toLocaleString('zh-CN')}${fresh?'':'（已过期）'}`:'尚未核查远端状态。';renderHumanVerification(state);$('#step-sites').textContent=sites.length?'✓':'2';$('#step-tunnel').textContent=cfg.tunnel_id?'✓':'3';const actionNames={admin_initialized:'初始化管理员',admin_login:'管理员登录',site_saved:'保存网站策略',settings_saved:'保存账户配置',credentials_updated:'更新加密凭据',tunnel_created:'创建Tunnel',turnstile_updated:'同步 Turnstile',publish_verified:'发布并核验成功',publish_incomplete:'发布未完成，需核对',connector_prepared:'检测 / 安装连接器',connector_started:'启动连接器',connector_stopped:'停止连接器',admin_password_changed:'修改管理员密码'};$('#audit-table').innerHTML=state.audit.length?'<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>资源摘要</th></tr></thead><tbody>'+state.audit.map(a=>`<tr><td>${new Date(a.at*1000).toLocaleString('zh-CN')}</td><td>${esc(actionNames[a.action]||a.action)}</td><td class="audit-detail">${esc(JSON.stringify(a.detail))}</td></tr>`).join('')+'</tbody></table></div>':'<div class="empty">暂时没有审计记录。</div>';$('#read-token-status').textContent=state.credentials.cf_read_token?'已保存':'未配置';$('#read-token-remove').hidden=!state.credentials.cf_read_token;$('#secret-status').textContent=state.credentials.turnstile_secret?'已保存':'未配置';if(currentView==='settings'&&!$('#settings-form').dataset.dirty)fillSettings();}
+function render(){if(!state)return;renderSetup();renderPermissionIssues();renderTokenManager();renderConnectorReadiness();renderNavigationIssues();renderActionAvailability();const sites=state.sites,cfg=state.settings,conn=state.connector,cf=state.cloudflare;$('#nav-count').textContent=sites.length;$('#stat-sites').textContent=sites.length;$('#stat-enabled').textContent=sites.filter(s=>s.enabled).length;$('#stat-human').textContent=sites.filter(s=>s.enabled&&s.human_check).length;const fresh=cf&&cf.tunnel_id===cfg.tunnel_id&&Date.now()/1000>=cf.checked_at&&(Date.now()/1000-cf.checked_at<150);$('#stat-edge').textContent=fresh?cf.connections:'—';$('#stat-edge-desc').textContent=cf?(fresh?'API 核验 · '+cf.edge_status:'上次核查已过期'):'尚未通过 API 核验';$('#flow-status').textContent=conn.running?'连接器已启动':'连接器未启动';$('#flow-status').className='badge '+(conn.running?'success':'neutral');$('#overview-sites').innerHTML=table(sites.slice(0,5));$('#sites-table').innerHTML=table(sites);$('#connector-status').textContent=conn.running?'运行中':conn.last_exit!=null?'已退出（'+conn.last_exit+'）':'未启动';$('#connector-status').className='badge '+(conn.running?'success':'neutral');$('#connector-path').textContent=cfg.cloudflared_path||(conn.installed?'已从 PATH 找到':'尚未找到 cloudflared.exe');$('#tunnel-id').textContent=cfg.tunnel_id||'尚未创建';$('#gateway-address').textContent='127.0.0.1:'+cfg.gateway_port;$('#edge-detail').textContent=cf?`边缘状态：${cf.edge_status} · 连接数：${cf.connections} · 核查时间：${new Date(cf.checked_at*1000).toLocaleString('zh-CN')}${fresh?'':'（已过期）'}`:'尚未核查远端状态。';renderHumanVerification(state);$('#step-sites').textContent=sites.length?'✓':'2';$('#step-tunnel').textContent=cfg.tunnel_id?'✓':'3';const actionNames={admin_initialized:'初始化管理员',admin_login:'管理员登录',site_saved:'保存网站策略',settings_saved:'保存账户配置',admin_local_login:'本机授权登录',local_login_approved:'允许本机授权登录',local_login_denied:'拒绝本机授权登录',credentials_updated:'更新加密凭据',tunnel_created:'创建Tunnel',turnstile_updated:'同步 Turnstile',publish_verified:'发布并核验成功',publish_incomplete:'发布未完成，需核对',connector_prepared:'检测 / 安装连接器',connector_started:'启动连接器',connector_stopped:'停止连接器',admin_password_changed:'修改管理员密码'};$('#audit-table').innerHTML=state.audit.length?'<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>资源摘要</th></tr></thead><tbody>'+state.audit.map(a=>`<tr><td>${new Date(a.at*1000).toLocaleString('zh-CN')}</td><td>${esc(actionNames[a.action]||a.action)}</td><td class="audit-detail">${esc(JSON.stringify(a.detail))}</td></tr>`).join('')+'</tbody></table></div>':'<div class="empty">暂无操作日志。</div>';$('#read-token-status').textContent=state.credentials.cf_read_token?'已保存':'未配置';$('#read-token-remove').hidden=!state.credentials.cf_read_token;$('#secret-status').textContent=state.credentials.turnstile_secret?'已保存':'未配置';if(currentView==='settings'&&!$('#settings-form').dataset.dirty)fillSettings();}
 function fillSettings(){const form=$('#settings-form');for(const el of form.elements)if(el.name)el.value=state.settings[el.name]??'';form.dataset.dirty='';}
 const setupFields = [
   {key:'account_id', label:'Account ID', selector:'#settings-form [name=account_id]', help:'填写 Cloudflare 账户 ID，并点击保存配置。'},
@@ -92,7 +92,8 @@ function setupProgress(current){
   if(!count)return {title,detail:'添加第一个网站，填写公网域名和局域网地址。',label:'添加网站 →',next:'add'};
   const enabled=current.sites.filter(site=>site.enabled),cfg=current.settings;
   if(!enabled.length)return {title,detail:'现有网站均未启用，可在网站管理中调整。',label:'管理网站 →',next:'sites'};
-  if(!cfg.tunnel_id)return {title,detail:'网站已登记，下一步创建 Tunnel，再发布网站映射。',label:'创建 Tunnel →',next:'connector'};
+  if(!cfg.tunnel_id)return {title,detail:current.tunnel_pending?'上次隧道创建结果需要核对，请恢复原请求。':'网站已登记，下一步创建隧道。',label:current.tunnel_pending?'核对并恢复隧道 →':'创建隧道 →',next:'connector'};
+  if(!current.credentials.tunnel_token)return {title,detail:'隧道已创建，请获取连接令牌。',label:'获取连接令牌 →',next:'connector'};
   if(enabled.some(site=>site.human_check)&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))return {title,detail:'现有网站启用了人类验证，请先完成 Turnstile 密钥配置。',label:'自动配置人类验证 →',next:'verification'};
   const desired=enabled.map(site=>site.hostname).sort(),published=[...(current.published_hosts||[])].sort();
   if(current.publication_needs_review||JSON.stringify(desired)!==JSON.stringify(published))return {title,detail:'网站映射尚需发布或核对，请在连接器中预览并应用配置。',label:'发布网站映射 →',next:'connector'};
@@ -160,7 +161,7 @@ $('#widget-create').onclick=async e=>{
     else toast('人类验证已自动配置，可继续预览并发布网站');
   }catch{}
 };
-$('#preview').onclick=async e=>{invalidatePlan();try{plan=await action(e.currentTarget,'cloudflare/preview');$('#plan-json').textContent=JSON.stringify(plan,null,2);$('#plan-empty').hidden=true;$('#plan-content').hidden=false;}catch{}};
+$('#preview').onclick=async e=>{invalidatePlan();try{plan=await action(e.currentTarget,'cloudflare/preview');$('#plan-json').textContent=JSON.stringify(plan,null,2);$('#apply').textContent=plan.routes_changed||plan.dns.some(record=>record.create)?'发布变更并核验':'核验现有路由';$('#plan-empty').hidden=true;$('#plan-content').hidden=false;}catch{}};
 $('#apply').onclick=async e=>{if(!plan)return;try{await action(e.currentTarget,'cloudflare/apply','网站路由已发布。',{revision:plan.revision});invalidatePlan()}catch{invalidatePlan()}};
 api('bootstrap').then(r=>{initialized=r.initialized;csrf=r.csrf;if(r.authenticated)openShell();else showAuth()}).catch(e=>$('#auth-error').textContent=e.message);
 setInterval(()=>{if(csrf)loadState().catch(()=>{})},15000);
@@ -181,10 +182,10 @@ $('#write-token-replace').onclick=()=>{replacingWriteToken=true;setTokenStep(2);
 $('#write-token-cancel').onclick=()=>{const input=$('#credentials-form [name=cf_write_token]');input.value='';replacingWriteToken=false;$('#credentials-feedback').textContent='已取消更换，继续使用原令牌。';renderSetup();};
 $('#token-account-next').onclick=()=>setTokenStep(1);
 
-$('#create-tunnel').onclick=async e=>{
+$('#create-tunnel').onclick=$('#tunnel-token-refresh').onclick=async e=>{
   const feedback=$('#tunnel-feedback'), help=$('#tunnel-permission-help');
-  feedback.hidden=false;feedback.className='form-feedback';feedback.textContent='正在核对域名并创建 Tunnel，请稍候…';help.hidden=true;
-  try{await action(e.currentTarget,'cloudflare/create-tunnel');feedback.textContent='Tunnel 已就绪，连接令牌已加密保存。';}
+  feedback.hidden=false;feedback.className='form-feedback';feedback.textContent=state.settings.tunnel_id?'正在获取连接令牌…':state.tunnel_pending?'正在核对并恢复上次创建结果…':'正在创建隧道…';help.hidden=true;
+  try{await action(e.currentTarget,'cloudflare/create-tunnel');feedback.textContent='隧道已配置，连接令牌已保存。';}
   catch(err){feedback.className='form-feedback error';feedback.textContent=err.message;help.hidden=!err.message.includes('HTTP 403');await loadState().catch(()=>{});}
 };
 
@@ -279,13 +280,13 @@ $('#token-manager-form').oninput=e=>{e.currentTarget.dataset.dirty='true';};
 
 function connectorReadiness(current){
   const cfg=current.settings,conn=current.connector,reasons=[];
+  if(conn.running)return {label:'运行中',kind:'success',detail:'连接器运行中。',attention:false};
 
   if(!conn.installed)reasons.push('尚未找到 cloudflared，可在账户与配置中自动检测或下载');
-  if(!cfg.tunnel_id&&current.cloudflare_setup?.ready)reasons.push('尚未创建 Tunnel');
-  else if(cfg.tunnel_id&&!current.credentials.tunnel_token)reasons.push('缺少 Tunnel 连接令牌，请点击“创建 Tunnel / 获取令牌”');
-  if(reasons.length)return {label:!conn.installed?'待安装连接器':!cfg.tunnel_id?'待创建 Tunnel':'待获取令牌',kind:'warning',detail:reasons.join('；')+'。',attention:true};
-  if(!current.cloudflare_setup?.ready)return {label:'待配置',kind:'neutral',detail:'请先完成账户与配置，再创建 Tunnel。',attention:true};
-  if(conn.running)return {label:'运行中',kind:'success',detail:'连接器运行中。',attention:false};
+  if(!cfg.tunnel_id&&current.cloudflare_setup?.ready)reasons.push(current.tunnel_pending?'上次隧道创建结果未知，请核对并恢复，勿重复创建':'尚未创建隧道');
+  else if(cfg.tunnel_id&&!current.credentials.tunnel_token)reasons.push('缺少连接令牌，请点击“获取连接令牌”');
+  if(reasons.length)return {label:!conn.installed?'待安装连接器':!cfg.tunnel_id?(current.tunnel_pending?'待恢复隧道':'待创建隧道'):'待获取连接令牌',kind:'warning',detail:reasons.join('；')+'。',attention:true};
+  if(!current.cloudflare_setup?.ready)return {label:'待配置',kind:'neutral',detail:'请先完成账户与配置，再创建隧道。',attention:true};
   return {label:'未启动',kind:'neutral',detail:'发布路由后启动连接器。',attention:true};
 }
 function renderConnectorReadiness(){
@@ -359,8 +360,12 @@ function renderActionAvailability(){
   const cfg=state.settings,credentials=state.credentials,conn=state.connector;
   const humanSites=state.sites.filter(site=>site.enabled&&site.human_check);
   const ready=!!state.cloudflare_setup?.ready;
+  $('#create-tunnel').textContent=cfg.tunnel_id?(credentials.tunnel_token?'隧道已配置':'获取连接令牌'):state.tunnel_pending?'核对并恢复隧道':'创建隧道';
+  $('#tunnel-maintenance').hidden=!(cfg.tunnel_id&&credentials.tunnel_token);
+  $('#connector-start').textContent=conn.running?'连接器运行中':'启动连接器';
   const rules={
-    'create-tunnel':[(cfg.tunnel_id?!!cfg.account_id&&credentials.cf_write_token:ready),'请先保存账户、域名和写入 API Token'],
+    'create-tunnel':[!(cfg.tunnel_id&&credentials.tunnel_token)&&(cfg.tunnel_id?!!cfg.account_id&&credentials.cf_write_token:ready),cfg.tunnel_id&&credentials.tunnel_token?'隧道和连接令牌已配置':'请先保存账户、域名和 API Token'],
+    'tunnel-token-refresh':[!!cfg.tunnel_id&&!!cfg.account_id&&!!credentials.cf_write_token,'请先创建隧道并配置 API Token'],
     'connector-start':[!!cfg.tunnel_id&&credentials.tunnel_token&&!conn.running,'请先创建 Tunnel 并获取连接令牌；已运行时无需重复启动'],
     'connector-stop':[conn.running,'连接器当前未运行'],
     'cf-check':[!!cfg.tunnel_id&&(credentials.cf_read_token||credentials.cf_write_token),'请先创建 Tunnel 并配置 API Token'],
