@@ -136,7 +136,12 @@ def main():
                 value = getpass.getpass(f"输入 {args.name}（隐藏输入）：").strip()
                 if len(value) < 10:
                     raise ValueError("令牌长度无效")
-                service.store.set_secret(args.name, value)
+                with service.store.lock, service.store.db:
+                    service.store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (args.name, service.store.cipher.encrypt(value.encode()).decode()))
+                    if args.name == "cf_write_token":
+                        service.store.db.execute("DELETE FROM secrets WHERE key=?", ("cf_oauth_profile",))
+                        for key in ("managed_business_token", "pending_business_token", "pending_browser_token"):
+                            service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
                 result = {"saved": True}
             elif args.command == "configure":
                 cfg = Settings(**json.loads(args.file.read_text(encoding="utf-8-sig"))).model_dump()

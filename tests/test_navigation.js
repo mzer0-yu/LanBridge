@@ -113,7 +113,7 @@ test('browser shortcut opens settings and starts authorization; repair remains a
   const alert=html.slice(html.indexOf('id="cloudflare-permission-alert"'),html.indexOf('id="state-refresh-warning"'));
   assert(alert.includes('data-browser-authorize="true"'));
   assert(alert.includes('修复当前令牌权限'));
-  assert(alert.includes('旧令牌保留'));
+  assert(alert.includes('无需再粘贴授权令牌'));
   assert(!alert.includes('手动编辑 Cloudflare'));
 });
 
@@ -133,11 +133,9 @@ test('authorization progress shows the wait limit and expired callback recovery'
   assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
 });
 
-test('delegation rejection exposes the authority alternative without confusing missing scope',()=>{
-  const nodes={};const context={state:{browser_auth:{phase:'error',message:'不可转授',next_action:'token_authority'},settings:{}},$:selector=>nodes[selector]||=({dataset:{}}),document:{querySelectorAll:()=>[]},Number,Math,Date};
-  vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('let browserAuthPoll;'),source.indexOf('$("#browser-authorize").onclick')),context);
-  context.renderBrowserAuth();assert.equal(nodes['#browser-auth-fallback'].hidden,false);
-  context.state.browser_auth.next_action='reauthorize';context.renderBrowserAuth();assert.equal(nodes['#browser-auth-fallback'].hidden,true);
-  context.state.browser_auth.phase='done';context.renderBrowserAuth();assert.equal(nodes['#browser-auth-fallback'].hidden,true);
+test('browser connection has no mandatory authority-token fallback',()=>{
+  const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+  assert(!html.includes('id="browser-auth-fallback"'));
+  assert(!source.includes("$('#browser-auth-fallback')"));
+  assert(html.includes('自动刷新凭据'));
 });
