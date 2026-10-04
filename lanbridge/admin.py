@@ -20,6 +20,9 @@ def create_admin(service, shutdown=None):
     browser_auth = BrowserAuth(service)
     service.browser_auth = browser_auth
     limiter = Limiter()
+    from .local_login import COOKIE, LIFETIME, LocalLogin, open_browser
+    local_login = LocalLogin(service.store)
+    app.state.local_login = local_login
     ui = Path(__file__).resolve().parent.parent / "ui"
 
     @app.middleware("http")
@@ -33,7 +36,7 @@ def create_admin(service, shutdown=None):
             return JSONResponse({"detail": "管理台仅监听本机"}, 403)
         if request.method not in ("GET", "HEAD") and request.headers.get("origin") != "http://" + host:
             return JSONResponse({"detail": "请求来源校验失败"}, 403)
-        public = request.url.path in ("/", "/app.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login")
+        public = request.url.path in ("/", "/app.js", "/local-login.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login", "/api/local-login/start", "/api/local-login/poll", "/api/local-login/cancel")
         session = service.store.session(request.cookies.get("lb_admin", ""))
         if not public and not session:
             return JSONResponse({"detail": "请登录管理员账户"}, 401)
@@ -80,6 +83,10 @@ def create_admin(service, shutdown=None):
     def style():
         return FileResponse(ui / "style.css")
 
+    @app.get("/local-login.js")
+    def local_login_script():
+        return FileResponse(ui / "local-login.js")
+
     @app.get("/favicon.svg")
     def favicon():
         return FileResponse(ui / "favicon.svg", media_type="image/svg+xml")
@@ -122,6 +129,44 @@ def create_admin(service, shutdown=None):
         response = JSONResponse({"logged_out": True})
         response.delete_cookie("lb_admin")
         return response
+
+    @app.post("/api/local-login/start")
+    async def start_local_login(request: Request):
+        import asyncio
+        if not service.store.get("admin"):
+            raise ValueError("请先创建管理员账户")
+        if not limiter.allow("local_login_start", 10):
+            return JSONResponse({"detail": "请求过于频繁，请稍后重试"}, 429)
+        request_id, proof, details = local_login.start(request.cookies.get(COOKIE, ""))
+        url = f'http://127.0.0.1:{service.settings()["admin_port"]}/#local-login={request_id}'
+        opened = await asyncio.to_thread(open_browser, url)
+        response = JSONResponse(details | {"request_id": request_id, "approval_url": url, "browser_opened": opened})
+        response.set_cookie(COOKIE, proof, httponly=True, samesite="strict", max_age=LIFETIME, path="/api/local-login")
+        return response
+
+    @app.post("/api/local-login/poll")
+    @app.post("/api/local-login/cancel")
+    async def poll_local_login(request: Request):
+        data = await body(request)
+        result, token = local_login.poll(str(data.get("request_id", "")), request.cookies.get(COOKIE, ""), request.url.path.endswith("/cancel"))
+        response = JSONResponse(result)
+        if token:
+            response.set_cookie("lb_admin", token, httponly=True, samesite="strict", max_age=28800)
+        if result["phase"] != "pending":
+            response.delete_cookie(COOKIE, path="/api/local-login")
+        return response
+
+    @app.get("/api/local-login/request/{request_id}")
+    def local_login_request(request_id: str):
+        return local_login.details(request_id)
+
+    @app.post("/api/local-login/approve")
+    async def approve_local_login(request: Request):
+        data = await body(request)
+        if not isinstance(data.get("allow"), bool):
+            raise ValueError("请选择允许或拒绝")
+        local_login.decide(str(data.get("request_id", "")), data.get("code", ""), data["allow"])
+        return {"approved": data["allow"]}
 
     @app.post("/api/shutdown")
     def shutdown_platform():
