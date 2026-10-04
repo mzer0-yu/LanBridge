@@ -132,3 +132,12 @@ test('authorization progress shows the wait limit and expired callback recovery'
   assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新发起/);
   assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
 });
+
+test('delegation rejection exposes the authority alternative without confusing missing scope',()=>{
+  const nodes={};const context={state:{browser_auth:{phase:'error',message:'不可转授',next_action:'token_authority'},settings:{}},$:selector=>nodes[selector]||=({dataset:{}}),document:{querySelectorAll:()=>[]},Number,Math,Date};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('let browserAuthPoll;'),source.indexOf('$("#browser-authorize").onclick')),context);
+  context.renderBrowserAuth();assert.equal(nodes['#browser-auth-fallback'].hidden,false);
+  context.state.browser_auth.next_action='reauthorize';context.renderBrowserAuth();assert.equal(nodes['#browser-auth-fallback'].hidden,true);
+  context.state.browser_auth.phase='done';context.renderBrowserAuth();assert.equal(nodes['#browser-auth-fallback'].hidden,true);
+});

@@ -180,6 +180,7 @@ function renderBrowserAuth(){
   const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
   $("#browser-auth-status").textContent=browserAuthMessage(job);
   $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
+  $('#browser-auth-fallback').hidden=job.phase!=='error'||job.next_action!=='token_authority';
   for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
     button.disabled=active||!!button.dataset.busy||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;
     button.title=active?'浏览器授权正在进行':state.token_management?.pending?'先前创建结果未知，请先核对':!tokenTemplateURL(state.settings)||!state.settings.zone_name?'请先保存账户和域名配置':'授权后创建新令牌并切换本机凭据，保留 Cloudflare 中的旧令牌';

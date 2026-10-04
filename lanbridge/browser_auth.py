@@ -29,9 +29,11 @@ class BrowserAuth:
         previous = service.store.get("browser_auth_job", {})
         if previous.get("phase") in ("preparing", "authorizing", "creating"):
             self.update("error", "上次浏览器授权被服务重启中断。若已有创建结果未知记录，请先在 Cloudflare 核对。")
+        elif previous.get("phase") == "error" and "当前授权不可授予：DNS Write" in previous.get("message", "") and not previous.get("next_action"):
+            self.update("error", "上次授权在 DNS Write 转授检查阶段被阻止，未创建或修改令牌。该记录未保存实际授予的 OAuth 范围，无法据此认定你漏选权限。无需反复授权，可提供 API Tokens Write 授权，自动修复当前用户令牌或创建新用户令牌。", next_action="token_authority")
 
-    def update(self, phase, message):
-        self.service.store.set("browser_auth_job", {"phase": phase, "message": message, "updated_at": time.time()})
+    def update(self, phase, message, **diagnostics):
+        self.service.store.set("browser_auth_job", {"phase": phase, "message": message, "updated_at": time.time(), **diagnostics})
 
     def status(self):
         return self.service.store.get("browser_auth_job", {"phase": "idle", "message": "在 Cloudflare 官方页面登录并授权后，自动创建并加密保存写入令牌。"})
@@ -132,6 +134,7 @@ class BrowserAuth:
     def worker(self, cfg, human_check):
         store = self.service.store
         command = None
+        diagnostics = {}
         try:
             command = self.command()
             auth_root = store.root / "browser-auth"
@@ -144,11 +147,25 @@ class BrowserAuth:
                     self.update("authorizing", "已请求打开系统浏览器。官方回调等待约 2 分钟；请确认权限并完成授权。超时后需重新发起，旧回调地址无法继续。")
                     self.run(command, env, directory, ["auth", "create", "lanbridge", "--no-device", "--scopes", *scopes], timeout=180)
                     self.update("creating", "授权已完成，正在核对权限并创建账户令牌…")
+                    identity = self.payload(self.run(command, env, directory, ["auth", "whoami", "--profile", "lanbridge"]))
+                    granted = identity.get("scopes") if isinstance(identity, dict) else None
+                    if not isinstance(granted, list) or any(not isinstance(scope, str) for scope in granted):
+                        raise ValueError("无法核对浏览器实际授予的权限范围，未创建令牌；请使用 API Tokens Write 授权流程。")
+                    # Retain only our known scope names, never the identity/email or raw CLI output.
+                    diagnostics = {"granted_scopes": [scope for scope in SCOPES if scope in granted]}
+                    needed = {"account_api_tokens:create", "dns.write", "zone.read"}
+                    missing = needed.difference(granted)
+                    if not any(scope in granted for scope in ("argotunnel.write", "teams-connector-cloudflared.write")):
+                        missing.add("Tunnel Write")
+                    if missing:
+                        diagnostics["next_action"] = "reauthorize"
+                        raise ValueError("浏览器实际未授予所需范围：" + "、".join(sorted(missing)) + "。未创建令牌；请仅核对这些权限后重新授权。")
                     groups = self.payload(self.run(command, env, directory, ["accounts", "tokens", "permission-groups", "list", "--profile", "lanbridge"]))
                     try:
                         policies = TokenManager.policies(groups, cfg, human_check)
                     except ValueError as exc:
-                        raise ValueError(str(exc) + " 浏览器登录成功不代表所需权限已授予；请重新授权并核对 Tunnel、DNS、Zone 及 Account API Token Provisioning，同时确认账户角色允许创建令牌。") from None
+                        diagnostics["next_action"] = "token_authority"
+                        raise ValueError(str(exc) + " 已核对 OAuth 实际包含所需的 Tunnel、DNS、Zone 和令牌创建范围，但账户令牌权限检查仍未通过。此响应不能区分账户角色与 Cloudflare 转授限制；无需反复授权。请使用 API Tokens Write 授权流程，自动修复当前用户令牌或创建新用户令牌。") from None
                     with self.service.lock:
                         current = self.service.settings()
                         if any(current[k] != cfg[k] for k in ("account_id", "zone_id", "zone_name")) or digest(store.secret("cf_write_token")) != cfg["credential_digest"]:
@@ -179,4 +196,4 @@ class BrowserAuth:
             message = str(exc) if isinstance(exc, ValueError) else "浏览器授权失败，请检查 Node.js、官方 CLI 安装和网络后重试。"
             if store.get("pending_browser_token"):
                 message += " 创建结果未知：请在 Cloudflare 账户 API Tokens 核对 " + store.get("pending_browser_token")["name"] + "。"
-            self.update("error", message)
+            self.update("error", message, **diagnostics)

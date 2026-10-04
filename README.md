@@ -184,3 +184,5 @@ API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF
 权限警告中的“浏览器授权并自动配置”按钮直接启动此流程，并显示进度。它创建替代写入令牌，不编辑当前用户令牌；OAuth 的 `account_api_tokens:create` 仅用于创建账户令牌。“修复当前令牌权限”使用独立的 API Tokens Write 用户授权，保留原令牌值。手动管理页面保留在账户配置说明中作为备用入口。
 
 授权包含 Tunnel 的旧版和 cloudflared 连接器权限范围；权限组识别兼容 Write / Edit 名称。Cloudflare 返回权限但标记 `is_selectable: false` 时明确提示不可授予，不创建令牌；请核对浏览器授予的范围以及账户角色。
+
+授权后通过官方 CLI `auth whoami` 单独核对实际授予的范围。只记录本平台请求的范围名称，不保存身份邮箱或原始响应。实际缺少范围时提示核对对应范围；范围齐全但账户令牌权限组不可授予时，提供用户 API Tokens Write 配置入口，避免反复授权。该响应无法区分账户角色与 Cloudflare 转授限制；不能据此声称用户漏选，也不会绕过 Cloudflare 权限检查。

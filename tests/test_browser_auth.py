@@ -23,6 +23,7 @@ def test_browser_consent_creates_scoped_account_token_and_cleans_session(browser
     calls = []
     def run(command, env, cwd, args, timeout=45):
         calls.append((args, env, cwd))
+        if args[:2] == ["auth", "whoami"]: return json.dumps({"scopes": SCOPES})
         if "permission-groups" in args:
             return json.dumps(groups())
         if args[:3] == ["accounts", "tokens", "create"]:
@@ -50,6 +51,7 @@ def test_browser_failure_preserves_credentials_and_unknown_creation_blocks_retry
     calls=[]
     def run(command, env, cwd, args, timeout=45):
         calls.append(args)
+        if args[:2] == ["auth", "whoami"]: return json.dumps({"scopes": SCOPES})
         if args[:2] == ["auth","create"]:
             if failure == "denied": raise ValueError("用户未完成授权")
             if failure == "changed": browser.service.store.set("settings", browser.service.settings() | {"zone_id":"d"*32})
@@ -101,6 +103,7 @@ def test_successful_login_without_selectable_tunnel_permissions_never_creates(br
     calls = []
     def run(command, env, cwd, args, timeout=45):
         calls.append(args)
+        if args[:2] == ["auth", "whoami"]: return json.dumps({"scopes": SCOPES})
         if "permission-groups" in args:
             available = groups()
             available[0]["is_selectable"] = False
@@ -110,7 +113,8 @@ def test_successful_login_without_selectable_tunnel_permissions_never_creates(br
     browser.start(); browser.thread.join(timeout=5)
     assert browser.status()["phase"] == "error"
     assert "不可授予" in browser.status()["message"]
-    assert "浏览器登录成功不代表" in browser.status()["message"]
+    assert "实际包含" in browser.status()["message"]
+    assert browser.status()["next_action"] == "token_authority"
     assert not any(args[:3] == ["accounts", "tokens", "create"] for args in calls)
     assert browser.service.store.secret("cf_write_token") == "old-business-secret"
     assert browser.service.store.get("pending_browser_token") is None
@@ -127,3 +131,38 @@ def test_cli_callback_timeout_has_specific_safe_retry_guidance(browser, monkeypa
     assert "重新发起" in str(error.value) and "secret-callback-code" not in str(error.value)
     assert browser.process is None
     assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+
+
+@pytest.mark.parametrize("granted_dns", [True, False])
+def test_dns_grant_and_token_delegation_are_distinct_and_secrets_are_not_retained(browser, monkeypatch, granted_dns):
+    calls = []
+    def run(command, env, cwd, args, timeout=45):
+        calls.append(args)
+        if args[:2] == ["auth", "whoami"]:
+            return json.dumps({"scopes": SCOPES if granted_dns else [s for s in SCOPES if s != "dns.write"], "email": "private@example.com", "token": "private-token-value"})
+        if "permission-groups" in args:
+            available = groups()
+            available[2]["is_selectable"] = False
+            return json.dumps(available)
+        return "authorized"
+    monkeypatch.setattr(browser, "run", run)
+    browser.start(); browser.thread.join(timeout=5)
+    status = browser.status()
+    assert status["phase"] == "error"
+    assert status["next_action"] == ("token_authority" if granted_dns else "reauthorize")
+    assert ("dns.write" in status["granted_scopes"]) == granted_dns
+    assert "private@example.com" not in json.dumps(status) and "private-token-value" not in json.dumps(status)
+    assert not any(args[:3] == ["accounts", "tokens", "create"] for args in calls)
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+    if granted_dns:
+        assert "DNS Write" in status["message"] and "无需反复授权" in status["message"]
+    else:
+        assert "实际未授予" in status["message"]
+
+
+def test_old_dns_rejection_gets_alternative_without_claiming_verified_grants(browser):
+    browser.service.store.set("browser_auth_job", {"phase": "error", "message": "Cloudflare 返回了所需权限但当前授权不可授予：DNS Write"})
+    migrated = BrowserAuth(browser.service).status()
+    assert migrated["next_action"] == "token_authority"
+    assert "未保存实际授予" in migrated["message"]
+    assert "granted_scopes" not in migrated
