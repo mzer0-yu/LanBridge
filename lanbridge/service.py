@@ -346,6 +346,9 @@ class Service:
             if binary.is_file():
                 defaults["cloudflared_path"] = str(binary)
             self.store.set("settings", defaults)
+        existing = self.store.get("settings", {})
+        if existing.get("tunnel_name") == "lanbridge-windows" and not existing.get("tunnel_id") and not self.store.get("owned_tunnel") and not self.store.get("pending_tunnel_create"):
+            self.store.set("settings", existing | {"tunnel_name": "LanBridge"})
         if not self.store.secret("signing_key"):
             self.store.set_secret("signing_key", secrets.token_urlsafe(48))
         self.cf = Cloudflare(self)

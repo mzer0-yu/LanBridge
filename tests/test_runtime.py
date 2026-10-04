@@ -67,3 +67,23 @@ def test_authenticated_shutdown_exits_servers_and_releases_runtime_lock(tmp_path
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=10)
+def test_default_tunnel_name_migration_preserves_created_pending_and_custom_names(tmp_path):
+    from lanbridge.service import Service
+    cases = [
+        ({"tunnel_name": "lanbridge-windows"}, None, None, "LanBridge"),
+        ({"tunnel_name": "lanbridge-windows", "tunnel_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}, None, None, "lanbridge-windows"),
+        ({"tunnel_name": "lanbridge-windows"}, {"name": "existing-create"}, None, "lanbridge-windows"),
+        ({"tunnel_name": "lanbridge-windows"}, None, "a" * 32, "lanbridge-windows"),
+        ({"tunnel_name": "LanBridge-家用电脑"}, None, None, "LanBridge-家用电脑"),
+    ]
+    for i, (settings, pending, owned, expected) in enumerate(cases):
+        root = tmp_path / str(i)
+        service = Service(root)
+        assert service.settings()["tunnel_name"] == "LanBridge"
+        service.store.set("settings", service.settings() | settings)
+        service.store.set("pending_tunnel_create", pending)
+        service.store.set("owned_tunnel", owned)
+        service.store.db.close()
+        reopened = Service(root)
+        assert reopened.settings()["tunnel_name"] == expected
+        reopened.store.db.close()
