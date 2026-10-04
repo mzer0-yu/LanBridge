@@ -7,15 +7,18 @@ import hmac
 import html
 import ipaddress
 import json
+import logging
+import secrets
+import tempfile
 import socket
 import threading
 import time
 from urllib.parse import urlsplit
 
 import httpx
+import anyio
 from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
-from starlette.background import BackgroundTask
 import websockets
 
 from .service import pinned_origin
@@ -24,6 +27,70 @@ from .store import password_check
 PASS_COOKIE = "__Host-lanbridge-pass"
 PREFIX = "/.lanbridge"
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
+
+
+class TransferLog:
+    """Correlate response framing failures without logging cookies or query strings."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        transfer = {"id": secrets.token_hex(8), "sent": 0, "read": 0, "status": None,
+                    "length": None, "encoding": None, "complete": False}
+        scope.setdefault("state", {})["transfer"] = transfer
+        failure = None
+        async def tracked_send(message):
+            if message["type"] == "http.response.start":
+                headers = dict(message["headers"])
+                transfer.update(status=message["status"], length=headers.get(b"content-length", b"").decode(),
+                                encoding=headers.get(b"content-encoding", b"identity").decode())
+                message = dict(message, headers=[*message["headers"], (b"x-lanbridge-request-id", transfer["id"].encode())])
+            await send(message)
+            if message["type"] == "http.response.body":
+                transfer["sent"] += len(message.get("body", b""))
+                transfer["complete"] = not message.get("more_body", False)
+        try:
+            await self.app(scope, receive, tracked_send)
+        except BaseException as exc:
+            failure = type(exc).__name__
+            raise
+        finally:
+            if failure or transfer.get("upstream_error") or transfer["sent"] >= 1024 * 1024 or (transfer["status"] and not transfer["complete"]):
+                logging.getLogger("uvicorn.error").warning("gateway_transfer %s", json.dumps({
+                    "request_id": transfer["id"], "method": scope["method"], "path": scope["path"],
+                    "status": transfer["status"], "content_length": transfer["length"],
+                    "content_encoding": transfer["encoding"], "upstream_bytes": transfer["read"],
+                    "upstream_length": transfer.get("upstream_length"), "upstream_error": transfer.get("upstream_error"),
+                    "downstream_bytes": transfer["sent"], "complete": transfer["complete"], "error": failure}))
+
+
+class PolicyMiddleware:
+    """Apply access checks without BaseHTTPMiddleware's response-stream relay."""
+    def __init__(self, app, check):
+        self.app, self.check = app, check
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            response = await self.check(Request(scope, receive))
+            if response is not None:
+                return await response(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
+class OwnedStreamingResponse(StreamingResponse):
+    """Release resources even when sending fails or the consumer disconnects."""
+    def __init__(self, *args, close, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.close = close
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.close()
 
 
 class Limiter:
@@ -159,8 +226,7 @@ def create_gateway(service):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     limiter = Limiter()
 
-    @app.middleware("http")
-    async def policy(request, call_next):
+    async def policy(request):
         site = find_site(service, request)
         if not site:
             return Response("Not found", 404)
@@ -175,7 +241,7 @@ def create_gateway(service):
         if not limiter.allow((site["id"], ip, "request"), site["requests_per_minute"]):
             return Response("请求过于频繁，请稍后重试", 429, headers={"Retry-After": "60"})
         if request.url.path == PREFIX + "/verify":
-            return await call_next(request)
+            return None
         if request.url.path.startswith(PREFIX):
             return Response("Not found", 404)
         protected = site["human_check"] or site["passcode_required"]
@@ -183,7 +249,7 @@ def create_gateway(service):
             if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
                 return gate_page(service, site)
             return JSONResponse({"detail": "需要先在浏览器中完成访问验证", "verification_required": True}, 401, headers={"Cache-Control": "no-store"})
-        return await call_next(request)
+        return None
 
     @app.post(PREFIX + "/verify")
     async def verify(request: Request):
@@ -269,9 +335,68 @@ def create_gateway(service):
                 v = ";".join(part for part in v.split(";") if not part.strip().lower().startswith("domain="))
             response_headers.append((k.encode("latin1"), v.encode("latin1")))
         async def close():
-            await upstream.aclose()
-            await client.aclose()
-        response = StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code, background=BackgroundTask(close))
+            try:
+                await upstream.aclose()
+            finally:
+                await client.aclose()
+        async def tracked_body():
+            async for chunk in upstream.aiter_raw():
+                request.state.transfer["read"] += len(chunk)
+                yield chunk
+        declared = upstream.headers.get("content-length")
+        no_body = request.method == "HEAD" or upstream.status_code in (204, 304) or upstream.status_code < 200
+        request.state.transfer["upstream_length"] = declared
+        if declared is not None and not no_body:
+            # Verify the raw encoded representation before forwarding a successful status.
+            # Memory is bounded to 1 MiB; larger downloads spill to the protected data directory.
+            spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=service.store.root)
+            try:
+                if not declared.isdigit():
+                    raise ValueError("invalid_response_length")
+                disconnected, stream_error = False, None
+                async with anyio.create_task_group() as tasks:
+                    async def watch_disconnect():
+                        nonlocal disconnected
+                        while True:
+                            if (await request.receive())["type"] == "http.disconnect":
+                                disconnected = True
+                                tasks.cancel_scope.cancel()
+                                return
+                    tasks.start_soon(watch_disconnect)
+                    try:
+                        async for chunk in tracked_body():
+                            await asyncio.to_thread(spool.write, chunk)
+                    except (httpx.HTTPError, ValueError) as exc:
+                        stream_error = exc
+                    finally:
+                        tasks.cancel_scope.cancel()
+                if disconnected:
+                    request.state.transfer["upstream_error"] = "ClientDisconnect"
+                    spool.close()
+                    return Response(status_code=499)
+                if stream_error:
+                    raise stream_error
+                if request.state.transfer["read"] != int(declared):
+                    raise ValueError("incomplete_response")
+                await asyncio.to_thread(spool.seek, 0)
+            except (httpx.HTTPError, ValueError) as exc:
+                request.state.transfer["upstream_error"] = type(exc).__name__
+                spool.close()
+                return Response("源站响应未完整接收，请重试", 502, headers={"Cache-Control": "no-store"})
+            except BaseException:
+                spool.close()
+                raise
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await close()
+            async def buffered_body():
+                while chunk := await asyncio.to_thread(spool.read, 65536):
+                    yield chunk
+            async def close_spool():
+                spool.close()
+            response = OwnedStreamingResponse(buffered_body(), close=close_spool, status_code=upstream.status_code)
+        else:
+            response = OwnedStreamingResponse(tracked_body(), close=close, status_code=upstream.status_code)
         response.raw_headers = response_headers
         return response
 
@@ -345,4 +470,6 @@ def create_gateway(service):
         finally:
             if sock:
                 sock.close()
+    app.add_middleware(PolicyMiddleware, check=policy)
+    app.add_middleware(TransferLog)
     return app
