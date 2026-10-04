@@ -60,7 +60,7 @@ class Settings(BaseModel):
     zone_id: str = ""
     zone_name: str = ""
     tunnel_id: str = ""
-    tunnel_name: str = "lanbridge-windows"
+    tunnel_name: str = "LanBridge"
     cloudflared_path: str = ""
     turnstile_sitekey: str = ""
     gateway_port: int = Field(default=8891, ge=1024, le=65535)

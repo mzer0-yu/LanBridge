@@ -52,14 +52,21 @@ class Cloudflare:
         self.service = service
 
     def request(self, method, path, body=None):
-        if "/challenges/widgets" in path and (self.service.store.get("managed_business_token") or {}).get("kind") == "account":
-            raise ValueError("Cloudflare 账户令牌目前不支持 Turnstile API。请手动配置 Turnstile Site/Secret Key，或使用具备 Turnstile 权限的用户令牌。")
+        if "/challenges/widgets" in path and (self.service.store.get("managed_business_token") or {}).get("kind") in ("account", "oauth"):
+            raise ValueError("当前浏览器授权或账户令牌未包含 Turnstile 权限，不支持 Turnstile API。请手动配置 Turnstile Site/Secret Key，或使用具备 Turnstile 权限的用户令牌。")
         sensitive_read = path.endswith("/token") or "/challenges/widgets" in path
         credential = "cf_read_token" if method == "GET" and not sensitive_read else "cf_write_token"
         token = self.service.store.secret(credential)
         if not token and method == "GET":
             credential = "cf_write_token"
             token = self.service.store.secret("cf_write_token")
+        if (self.service.store.get("managed_business_token") or {}).get("kind") == "oauth":
+            credential = "cf_write_token"
+            auth = getattr(self.service, "browser_auth", None)
+            if auth is None:
+                from .browser_auth import BrowserAuth
+                auth = BrowserAuth(self.service)
+            token = auth.access_token()
         if not token:
             raise ValueError("请先配置 Cloudflare API 令牌")
         try:
@@ -67,7 +74,7 @@ class Cloudflare:
                 response = client.request(method, "https://api.cloudflare.com/client/v4" + path,
                                           headers={"Authorization": "Bearer " + token}, json=body)
             if response.status_code >= 400:
-                detail = self.failure_hint(method, path, response, credential)
+                detail = self.failure_hint(method, path, response, "oauth" if (self.service.store.get("managed_business_token") or {}).get("kind") == "oauth" else credential)
                 if response.status_code in (401, 403):
                     with self.service.lock:
                         issues = self.service.store.get("cloudflare_permission_issues", {})
@@ -107,9 +114,11 @@ class Cloudflare:
             operation, permission = "访问 DNS", "区域 → DNS → 编辑，区域资源需包含配置的 Zone"
         else:
             operation, permission = "读取域名", "区域 → Zone → 读取，区域资源需包含配置的 Zone"
-        name = "只读 API Token" if credential == "cf_read_token" else "写入 API Token"
+        name = "浏览器 OAuth 授权" if credential == "oauth" else "只读 API Token" if credential == "cf_read_token" else "写入 API Token"
         prefix = f"Cloudflare API HTTP {response.status_code}：{operation}失败（使用{name}"
         prefix += ("，错误码 " + ",".join(codes[:3]) if codes else "") + "）。"
+        if credential == "oauth" and response.status_code in (401, 403):
+            return prefix + "请重新浏览器授权并核对资源范围及账户角色；无需提供 API Tokens Write 令牌。"
         if response.status_code == 403:
             return prefix + "请核对令牌权限：" + permission + "。若已授予，请检查令牌有效期及客户端 IP 限制；更新后在设置中更换令牌再重试。"
         if response.status_code == 401:
@@ -346,6 +355,9 @@ class Service:
             if binary.is_file():
                 defaults["cloudflared_path"] = str(binary)
             self.store.set("settings", defaults)
+        existing = self.store.get("settings", {})
+        if existing.get("tunnel_name") == "lanbridge-windows" and not existing.get("tunnel_id") and not self.store.get("owned_tunnel") and not self.store.get("pending_tunnel_create"):
+            self.store.set("settings", existing | {"tunnel_name": "LanBridge"})
         if not self.store.secret("signing_key"):
             self.store.set_secret("signing_key", secrets.token_urlsafe(48))
         self.cf = Cloudflare(self)

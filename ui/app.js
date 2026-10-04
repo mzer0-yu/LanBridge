@@ -25,6 +25,9 @@ const setupFields = [
 let replacingWriteToken=false, tokenWizardStep=null;
 function renderCredentialsGuide(){
   const saved=!!state.credentials.cf_write_token;
+  const oauth=state.token_management?.managed?.kind==='oauth';
+  $('#write-token-saved h3').textContent=oauth?'✓ 浏览器授权已加密保存':'✓ 写入 API Token 已加密保存';
+  $('#write-token-saved p').textContent=oauth?'已通过浏览器接入 Cloudflare，凭据将自动刷新，无需粘贴令牌。':'当前凭据已配置，无需重复填写。为保护令牌，不显示原文。';
   const accountReady=!!tokenTemplateURL(state.settings)&&!!state.settings.zone_name;
   if(tokenWizardStep===null)tokenWizardStep=accountReady?1:0;
   $('#write-token-saved').hidden=!saved||replacingWriteToken;
@@ -171,9 +174,14 @@ async function startBrowserAuthorization(button){
 }
 
 let browserAuthPoll;
+function browserAuthMessage(job){
+  if(job.phase!=='authorizing'||!Number.isFinite(job.updated_at))return job.message;
+  const seconds=Math.max(0,Math.ceil(120-(Date.now()/1000-job.updated_at)));
+  return job.message+(seconds>0?' 预计剩余约 '+seconds+' 秒。':' 等待已接近时限，正在确认授权结果；若浏览器回调连接失败，请等待本次任务结束后重新发起。');
+}
 function renderBrowserAuth(){
   const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
-  $("#browser-auth-status").textContent=job.message;
+  $("#browser-auth-status").textContent=browserAuthMessage(job);
   $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
   for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
     button.disabled=active||!!button.dataset.busy||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;
@@ -194,13 +202,13 @@ function renderTokenManager(){
   $('#token-create-read').disabled=!ready||busy||!!management.pending_read;
   $('#token-create-read').textContent='自动创建新只读 API Token';
   $('#token-repair-read').disabled=!ready||busy||!state.credentials.cf_read_token;
-  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token||management.managed?.kind==='account';
-  $('#token-repair-write').title=management.managed?.kind==='account'?'账户令牌请重新浏览器授权创建，或在 Cloudflare 账户 API Tokens 编辑':'为当前令牌补齐权限，保留令牌值';
+  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token||['account','oauth'].includes(management.managed?.kind);
+  $('#token-repair-write').title=['account','oauth'].includes(management.managed?.kind)?'浏览器授权请重新授权；账户令牌请在 Cloudflare 管理':'为当前令牌补齐权限，保留令牌值';
   $('#token-manager-forget').disabled=busy;
   $('#read-manager-status').textContent=management.pending_read?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending_read.name+'；平台不会重复创建。':management.managed_read?'只读令牌已托管，可自动更新权限。':state.credentials.cf_read_token?'只读令牌已保存，可选择修复当前权限。':'未配置只读令牌；创建后读取操作会使用它。';
   $('#token-manager-forget').hidden=!management.authority_saved;
   $('#token-manager-form [name=authority]').placeholder=management.authority_saved?'授权令牌已加密保存；留空使用已保存授权':'粘贴授权令牌，仅用于令牌管理';
-  $('#token-manager-status').textContent=management.pending?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending.name+'；通过下方手动配置接入已有令牌。':!ready?'请先保存左侧的 Account ID、Zone ID 和 Zone 名称。':management.managed?'业务令牌已托管 · '+cfg.zone_name+(management.authority_saved?'；授权令牌已加密保存。':'；再次更新需提供授权令牌。'):management.authority_saved?'授权令牌已加密保存，可自动创建业务令牌。':'账户和域名已准备好，请提供授权令牌。';
+  $('#token-manager-status').textContent=management.pending?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending.name+'；通过下方手动配置接入已有令牌。':!ready?'请先保存左侧的 Account ID、Zone ID 和 Zone 名称。':management.managed?.kind==='oauth'?'浏览器授权已接入，凭据自动刷新；下方令牌管理为可选高级功能。':management.managed?'业务令牌已托管 · '+cfg.zone_name+(management.authority_saved?'；授权令牌已加密保存。':'；再次更新需提供授权令牌。'):management.authority_saved?'授权令牌已加密保存，可自动创建业务令牌。':'账户和域名已准备好，请提供授权令牌。';
 }
 $('#token-manager-form').onsubmit=async e=>{
   e.preventDefault();const form=e.currentTarget,feedback=$('#token-manager-feedback');

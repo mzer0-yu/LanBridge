@@ -75,8 +75,8 @@ class TokenManager:
             authority = authority.strip() or store.secret("cf_token_authority")
             if not 10 <= len(authority) <= 4096:
                 raise ValueError("请提供 API Tokens Write 授权令牌。")
-            if not force_new and target == "write" and (store.get("managed_business_token") or {}).get("kind") == "account":
-                raise ValueError("当前是浏览器授权创建的账户令牌，请重新使用浏览器授权创建，或在 Cloudflare 账户 API Tokens 编辑权限。")
+            if not force_new and target == "write" and (store.get("managed_business_token") or {}).get("kind") in ("account", "oauth"):
+                raise ValueError("当前使用浏览器授权或账户令牌，请重新浏览器授权；用户令牌管理不能修复 OAuth 授权。")
             groups = self.request(authority, "GET", "/user/tokens/permission_groups")
             policies = self.policies(groups, cfg, human_check, target)
             owned = None if force_new else store.get(record_key)
@@ -143,6 +143,8 @@ class TokenManager:
             # Credential and ownership record commit together; no token secrets in API results.
             with store.lock, store.db:
                 if action == "created":
+                    if target == "write":
+                        store.db.execute("DELETE FROM secrets WHERE key=?", ("cf_oauth_profile",))
                     store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (credential, store.cipher.encrypt(result["value"].encode()).decode()))
                 if remember:
                     store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", ("cf_token_authority", store.cipher.encrypt(authority.encode()).decode()))

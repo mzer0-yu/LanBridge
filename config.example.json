@@ -2,7 +2,7 @@
   "account_id": "",
   "zone_id": "",
   "zone_name": "example.com",
-  "tunnel_name": "lanbridge-windows",
+  "tunnel_name": "LanBridge",
   "cloudflared_path": "",
   "turnstile_sitekey": "",
   "admin_port": 8890,

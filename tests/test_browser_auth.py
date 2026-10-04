@@ -1,9 +1,10 @@
 import json
-import threading
+import time
+from pathlib import Path
+from datetime import datetime, timezone
 import pytest
 from lanbridge.browser_auth import BrowserAuth, SCOPES
 from lanbridge.service import Service, digest
-from test_token_manager import groups
 
 @pytest.fixture
 def browser(tmp_path, monkeypatch):
@@ -12,60 +13,113 @@ def browser(tmp_path, monkeypatch):
     service.store.set_secret("cf_write_token", "old-business-secret")
     service.store.set_secret("cf_read_token", "old-read-secret")
     browser = BrowserAuth(service)
-    monkeypatch.setattr(browser, "command", lambda: ["node", "official-cf"])
+    service.browser_auth = browser
+    monkeypatch.setattr(BrowserAuth, "command", lambda self: ["node", "official-cf"])
+    monkeypatch.setattr(browser, "validate_zone", lambda token, cfg: None)
     yield browser
     browser.stop()
     if browser.thread:
         browser.thread.join(timeout=5)
     service.store.db.close()
 
-def test_browser_consent_creates_scoped_account_token_and_cleans_session(browser, monkeypatch):
-    calls = []
-    def run(command, env, cwd, args, timeout=45):
-        calls.append((args, env, cwd))
-        if "permission-groups" in args:
-            return json.dumps(groups())
-        if args[:3] == ["accounts", "tokens", "create"]:
-            body = json.loads(args[args.index("--policies")+1])
-            assert body[0]["resources"] == {"com.cloudflare.api.account."+"a"*32:"*"}
-            assert body[1]["resources"] == {"com.cloudflare.api.account.zone."+"b"*32:"*"}
-            assert len(body[0]["permission_groups"]) == 1
-            return json.dumps({"id":"c"*32,"value":"new-account-token-secret"})
-        return "authorized"
-    monkeypatch.setattr(browser, "run", run)
-    browser.start();browser.thread.join(timeout=5)
-    assert browser.status()["phase"] == "done"
-    assert browser.service.store.secret("cf_write_token") == "new-account-token-secret"
-    assert browser.service.store.secret("cf_read_token") == "old-read-secret"
-    assert browser.service.store.get("managed_business_token")["kind"] == "account"
-    assert browser.service.store.get("pending_browser_token") is None
-    assert "new-account-token-secret" not in json.dumps(browser.status())+json.dumps(browser.service.store.audit_list())
-    assert calls[0][0][:3] == ["auth","create","lanbridge"]
-    assert calls[0][0][-len(SCOPES):] == SCOPES
-    assert calls[-1][0] == ["auth","logout","--profile","lanbridge"]
-    assert not calls[0][2].exists()
+def snapshot(token="oauth-access-secret", expiry=None):
+    return {"path":"cloudflare/config/lanbridge.json", "profile":{"oauth_token": token, "refresh_token":"oauth-refresh-secret", "expiration_time":datetime.fromtimestamp(expiry or time.time()+3600, timezone.utc).isoformat(), "scopes": SCOPES}}
 
-@pytest.mark.parametrize("failure", ["denied", "changed", "unknown"])
-def test_browser_failure_preserves_credentials_and_unknown_creation_blocks_retry(browser, monkeypatch, failure):
+def fake_login(browser, monkeypatch, scopes=None, change=False):
     calls=[]
     def run(command, env, cwd, args, timeout=45):
-        calls.append(args)
-        if args[:2] == ["auth","create"]:
-            if failure == "denied": raise ValueError("用户未完成授权")
-            if failure == "changed": browser.service.store.set("settings", browser.service.settings() | {"zone_id":"d"*32})
+        calls.append((args, cwd))
+        if args[:2]==["auth","create"]:
+            data=snapshot();data["profile"]["scopes"]=SCOPES if scopes is None else scopes
+            path=cwd/data["path"];path.parent.mkdir(parents=True);path.write_text(json.dumps(data["profile"]))
+            if change: browser.service.store.set("settings", browser.service.settings() | {"zone_id":"d"*32})
             return "authorized"
-        if "permission-groups" in args: return json.dumps(groups())
-        if args[:3] == ["accounts","tokens","create"]: raise ValueError("创建超时")
-        return ""
+        if args[:2]==["auth","whoami"]: return json.dumps({"scopes":SCOPES if scopes is None else scopes,"email":"private@example.com"})
+        raise AssertionError("No token delegation or logout expected")
     monkeypatch.setattr(browser,"run",run)
+    return calls
+
+def test_browser_consent_directly_connects_and_cleans_temporary_files(browser, monkeypatch):
+    calls=fake_login(browser,monkeypatch)
     browser.start();browser.thread.join(timeout=5)
-    assert browser.status()["phase"] == "error"
-    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
-    creates=[args for args in calls if args[:3]==["accounts","tokens","create"]]
-    assert len(creates) == (1 if failure=="unknown" else 0)
-    if failure=="unknown":
-        assert browser.service.store.get("pending_browser_token")
-        with pytest.raises(ValueError,match="结果未知"):browser.start()
+    assert browser.status()["phase"]=="done"
+    assert browser.service.store.secret("cf_write_token")=="oauth-access-secret"
+    assert browser.service.store.secret("cf_read_token")=="old-read-secret"
+    assert browser.service.store.get("managed_business_token")["kind"]=="oauth"
+    assert "account_api_tokens:create" not in SCOPES
+    assert browser.service.store.secret("cf_oauth_profile")
+    public=json.dumps(browser.status())+json.dumps(browser.service.store.audit_list())
+    assert "oauth-access-secret" not in public and "oauth-refresh-secret" not in public and "private@example.com" not in public
+    assert not calls[0][1].exists()
+    assert len(calls)==2
+
+@pytest.mark.parametrize("failure", ["missing_scope", "changed", "zone"])
+def test_failed_authorization_preserves_previous_credentials(browser, monkeypatch, failure):
+    fake_login(browser,monkeypatch, scopes=[s for s in SCOPES if s!="dns.write"] if failure=="missing_scope" else None,change=failure=="changed")
+    if failure=="zone": monkeypatch.setattr(browser,"validate_zone",lambda *a: (_ for _ in ()).throw(ValueError("Zone不匹配")))
+    browser.start();browser.thread.join(timeout=5)
+    assert browser.status()["phase"]=="error"
+    assert browser.service.store.secret("cf_write_token")=="old-business-secret"
+    assert not browser.service.store.secret("cf_oauth_profile")
+
+
+def test_oauth_refresh_persists_rotation_without_exposing_secrets(browser,monkeypatch):
+    browser.save_profile(snapshot(expiry=time.time()-60),browser.service.settings())
+    calls=[]
+    def run(self,command,env,cwd,args,timeout=45):
+        calls.append(cwd)
+        path=cwd/snapshot()["path"]
+        data=json.loads(path.read_text());assert data["refresh_token"]=="oauth-refresh-secret"
+        path.write_text(json.dumps(snapshot("rotated-access-secret")["profile"]))
+        return "{}"
+    monkeypatch.setattr(BrowserAuth,"run",run)
+    assert browser.access_token()=="rotated-access-secret"
+    assert browser.service.store.secret("cf_write_token")=="rotated-access-secret"
+    assert not calls[0].exists()
+    assert browser.access_token()=="rotated-access-secret" and len(calls)==1
+
+
+def test_refresh_failure_is_retryable_and_keeps_credentials(browser,monkeypatch):
+    browser.save_profile(snapshot(expiry=time.time()-60),browser.service.settings())
+    monkeypatch.setattr(BrowserAuth,"run",lambda *a,**k: (_ for _ in ()).throw(ValueError("private-refresh-secret")))
+    with pytest.raises(ValueError,match="重新浏览器授权") as exc:browser.access_token()
+    assert "private-refresh-secret" not in str(exc.value)
+    assert browser.service.store.secret("cf_write_token")=="oauth-access-secret"
+    assert not list((browser.service.store.root/"browser-auth").iterdir())
+
+
+def test_oauth_is_bound_to_configured_account_and_zone(browser):
+    browser.save_profile(snapshot(),browser.service.settings())
+    browser.service.store.set("settings",browser.service.settings() | {"account_id":"e"*32})
+    with pytest.raises(ValueError,match="已变化"):browser.access_token()
+
+
+def test_oauth_takes_precedence_over_old_read_token(browser,monkeypatch):
+    import httpx
+    browser.save_profile(snapshot(),browser.service.settings())
+    def request(self,method,url,headers,json):
+        assert headers["Authorization"]=="Bearer oauth-access-secret"
+        return httpx.Response(200,json={"success":True,"result":{"ok":True}})
+    monkeypatch.setattr(httpx.Client,"request",request)
+    assert browser.service.cf.request("GET","/zones/"+"b"*32)=={"ok":True}
+
+
+def test_profile_traversal_cannot_write_outside_temporary_directory(browser):
+    data=snapshot(expiry=time.time()-60);data["path"]="../../lanbridge.json"
+    browser.save_profile(data,browser.service.settings())
+    with pytest.raises(ValueError,match="刷新失败"):browser.access_token()
+
+
+def test_missing_refresh_token_rejects_incomplete_profile(browser,tmp_path):
+    data=snapshot()["profile"];data.pop("refresh_token")
+    (tmp_path/"lanbridge.json").write_text(json.dumps(data))
+    with pytest.raises(ValueError,match="可刷新授权"):browser.read_profile(tmp_path)
+
+
+def test_old_delegation_failure_points_to_browser_authorization(browser):
+    browser.service.store.set("browser_auth_job",{"phase":"error","next_action":"token_authority"})
+    status=BrowserAuth(browser.service).status()
+    assert status["next_action"]=="reauthorize" and "无需另行提供" in status["message"]
 
 def test_isolated_environment_removes_existing_credentials_and_node_injection(monkeypatch,tmp_path):
     monkeypatch.setenv("CLOUDFLARE_API_TOKEN","private-secret")
@@ -97,20 +151,38 @@ def test_account_token_turnstile_is_explained_before_network_request(browser):
         browser.service.cf.request("POST","/accounts/"+"a"*32+"/challenges/widgets",{})
 
 
-def test_successful_login_without_selectable_tunnel_permissions_never_creates(browser, monkeypatch):
-    calls = []
-    def run(command, env, cwd, args, timeout=45):
-        calls.append(args)
-        if "permission-groups" in args:
-            available = groups()
-            available[0]["is_selectable"] = False
-            return json.dumps(available)
-        return "authorized"
-    monkeypatch.setattr(browser, "run", run)
-    browser.start(); browser.thread.join(timeout=5)
-    assert browser.status()["phase"] == "error"
-    assert "不可授予" in browser.status()["message"]
-    assert "浏览器登录成功不代表" in browser.status()["message"]
-    assert not any(args[:3] == ["accounts", "tokens", "create"] for args in calls)
+def test_cli_callback_timeout_has_specific_safe_retry_guidance(browser, monkeypatch, tmp_path):
+    class Process:
+        returncode = 1
+        def communicate(self, timeout):
+            return b"", b"Timed out waiting for authorization code, please try again. secret-callback-code"
+    monkeypatch.setattr("lanbridge.browser_auth.subprocess.Popen", lambda *a, **kw: Process())
+    with pytest.raises(ValueError, match="8877") as error:
+        browser.run(["node", "cf"], {}, tmp_path, ["auth", "create", "lanbridge"])
+    assert "重新发起" in str(error.value) and "secret-callback-code" not in str(error.value)
+    assert browser.process is None
     assert browser.service.store.secret("cf_write_token") == "old-business-secret"
-    assert browser.service.store.get("pending_browser_token") is None
+
+
+def test_malformed_zone_response_is_reported_without_stuck_job(browser,monkeypatch):
+    import httpx
+    monkeypatch.setattr(httpx.Client,"get",lambda *a,**k:httpx.Response(200,json={"success":True,"result":"invalid"}))
+    with pytest.raises(ValueError,match="响应无效"):
+        BrowserAuth.validate_zone("oauth-access-secret",browser.service.settings())
+
+
+def test_manual_token_replacement_clears_oauth_and_never_returns_secrets(browser):
+    from fastapi.testclient import TestClient
+    from lanbridge.admin import create_admin
+    from lanbridge.store import password_hash
+    browser.save_profile(snapshot(),browser.service.settings())
+    browser.service.store.set("admin",{"username":"admin","password_hash":password_hash("correct horse battery")})
+    client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
+    login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
+    state=client.get("/api/state").text
+    assert "oauth-access-secret" not in state and "oauth-refresh-secret" not in state
+    result=client.post("/api/credentials",json={"cf_write_token":"manual-replacement-secret"},headers={"X-CSRF-Token":login.json()["csrf"]})
+    assert result.status_code==200
+    assert not browser.service.store.secret("cf_oauth_profile")
+    assert browser.service.store.get("managed_business_token") is None
+    assert browser.service.store.secret("cf_write_token")=="manual-replacement-secret"

@@ -171,16 +171,14 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 
 自动创建新令牌入口始终新建并加密保存，即使已有托管令牌；成功后切换本机凭据，旧令牌不会删除。API/MCP 使用 `force_new: true`，CLI 使用 `--force-new`；不可与 `repair_existing` 同时使用。创建结果未知时仍禁止重复创建。
 
-## 浏览器授权创建令牌
+## 浏览器授权接入 Cloudflare
 
-账户与配置 → 浏览器授权并创建令牌。使用官方 `cf` CLI 1.0.0-beta.12 的 PKCE 本机回调流程，在系统浏览器登录并确认授权后，通过账户令牌 API 创建限定到配置账户和 Zone 的 Tunnel Write、DNS Write、Zone Read 令牌。无需手动提供 API Tokens Write。用户必须具备 API Token Provisioning 或相应管理员权限。创建成功后切换本机写入凭据，旧令牌不删除。
+账户与配置 → 浏览器授权并自动配置。官方 `cf` CLI 1.0.0-beta.12 使用 PKCE 本机回调；用户在浏览器确认一次 Tunnel Write、DNS Write、Zone Read 和账户读取权限。平台直接使用 OAuth 授权访问 API，不创建子令牌，不需要 API Tokens Write 或 Account API Token Provisioning。授权后先核对实际范围、域名名称、账户归属及 Active 状态，再替换本机凭据；失败保留原凭据。
 
-Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。临时 OAuth 配置位于受保护的数据目录，流程结束尝试撤销临时 CLI 登录并删除本机临时配置，不影响其他 CLI 登录。不保存账户密码，也不将令牌值返回界面。创建结果未知时阻止再次创建，需在 Cloudflare 账户 API Tokens 核对并手动接入。授权期间改变账户、域名或写入凭据会阻止创建。
+授权和刷新凭据通过 Windows DPAPI 加密保存。每次 API 操作前检查有效期，接近到期时通过官方 CLI 自动刷新。刷新使用独立的受保护临时目录，结束删除临时文件；不影响用户其他 CLI 登录，不保存账户密码，秘密不返回管理页面或日志。撤销授权、资源权限变化或网络异常可能需要重新授权。
 
-账户令牌目前不支持 Turnstile API；浏览器入口不会授予 Turnstile 权限。人类验证可手动配置 Site Key 与 Secret Key，或通过用户令牌流程自动配置。账户令牌权限可在 Cloudflare 账户 API Tokens 编辑，或重新浏览器授权创建；用户 API Tokens Write 修复入口不用于账户令牌。
+Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 CLI 到忽略的 bin/cf-runtime。官方本机回调等待约 2 分钟；超时需要重新发起，旧回调地址无法继续。授权期间修改账户、域名或凭据会停止本次配置。
 
-API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI](https://developers.cloudflare.com/cf/get-started/) 与 [账户令牌兼容性](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)。
+此 OAuth 范围不包含 Turnstile。人类验证可单独配置 Site Key 和 Secret Key，或使用高级用户令牌管理流程。手动更换写入令牌会清除本机 OAuth 凭据，切回令牌模式。
 
-权限警告中的“浏览器授权并自动配置”按钮直接启动此流程，并显示进度。它创建替代写入令牌，不编辑当前用户令牌；OAuth 的 `account_api_tokens:create` 仅用于创建账户令牌。“修复当前令牌权限”使用独立的 API Tokens Write 用户授权，保留原令牌值。手动管理页面保留在账户配置说明中作为备用入口。
-
-授权包含 Tunnel 的旧版和 cloudflared 连接器权限范围；权限组识别兼容 Write / Edit 名称。Cloudflare 返回权限但标记 `is_selectable: false` 时明确提示不可授予，不创建令牌；请核对浏览器授予的范围以及账户角色。
+API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI 授权说明](https://developers.cloudflare.com/cf/get-started/)。

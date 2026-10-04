@@ -113,7 +113,7 @@ test('browser shortcut opens settings and starts authorization; repair remains a
   const alert=html.slice(html.indexOf('id="cloudflare-permission-alert"'),html.indexOf('id="state-refresh-warning"'));
   assert(alert.includes('data-browser-authorize="true"'));
   assert(alert.includes('修复当前令牌权限'));
-  assert(alert.includes('旧令牌保留'));
+  assert(alert.includes('无需再粘贴授权令牌'));
   assert(!alert.includes('手动编辑 Cloudflare'));
 });
 
@@ -123,4 +123,19 @@ test('browser authorization launch failure stays visible next to its entry',asyn
   vm.runInContext(source.slice(source.indexOf('async function startBrowserAuthorization('),source.indexOf('let browserAuthPoll;')),context);
   await context.startBrowserAuthorization({dataset:{}});
   assert.equal(status.textContent,'账户未配置');assert.equal(status.className,'form-feedback error');
+});
+
+test('authorization progress shows the wait limit and expired callback recovery',()=>{
+  const context={Date:{now:()=>1000000},Number,Math};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function browserAuthMessage('),source.indexOf('function renderBrowserAuth(')),context);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:940,message:'授权中'}),/60 秒/);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新发起/);
+  assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
+});
+
+test('browser connection has no mandatory authority-token fallback',()=>{
+  const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+  assert(!html.includes('id="browser-auth-fallback"'));
+  assert(!source.includes("$('#browser-auth-fallback')"));
+  assert(html.includes('自动刷新凭据'));
 });

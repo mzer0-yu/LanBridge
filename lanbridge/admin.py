@@ -219,6 +219,7 @@ def create_admin(service, shutdown=None):
                     service.store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (k, value))
                 service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("credential_updated_at", json.dumps(changed)))
                 if "cf_write_token" in values:
+                    service.store.db.execute("DELETE FROM secrets WHERE key=?", ("cf_oauth_profile",))
                     for key in ("managed_business_token", "pending_business_token", "pending_browser_token"):
                         service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
                 if "cf_read_token" in values:
