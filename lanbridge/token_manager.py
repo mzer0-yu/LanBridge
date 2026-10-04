@@ -40,13 +40,17 @@ class TokenManager:
         if not isinstance(groups, list) or any(not isinstance(g, dict) for g in groups):
             raise ValueError("Cloudflare 权限列表格式异常；未创建或修改令牌。")
         def group(names, scope):
+            unavailable = False
             for name in names:
                 matches = [g for g in groups if g.get("name") == name and isinstance(g.get("scopes"), list) and scope in g["scopes"] and g.get("is_selectable", True)]
+                unavailable = unavailable or any(g.get("name") == name and isinstance(g.get("scopes"), list) and scope in g["scopes"] and g.get("is_selectable") is False for g in groups)
                 if len(matches) == 1 and isinstance(matches[0].get("id"), str) and re.fullmatch(r"[a-fA-F0-9]{32}", matches[0]["id"]):
                     return {"id": matches[0]["id"]}
+            if unavailable:
+                raise ValueError("Cloudflare 返回了所需权限但当前授权不可授予：" + names[0] + "；未创建或修改令牌。")
             raise ValueError("Cloudflare 未提供所需权限：" + names[0] + "；未创建或修改令牌。")
         account_scope, zone_scope = "com.cloudflare.api.account", "com.cloudflare.api.account.zone"
-        account = [group(["Cloudflare Tunnel Read", "Cloudflare One Connector: cloudflared Read", "Cloudflare One Connectors Read"] if target == "read" else ["Cloudflare Tunnel Write", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connectors Write"], account_scope)]
+        account = [group(["Cloudflare Tunnel Read", "Cloudflare One Connector: cloudflared Read", "Cloudflare One Connectors Read"] if target == "read" else ["Cloudflare Tunnel Write", "Cloudflare Tunnel Edit", "Cloudflare One Connector: cloudflared Write", "Cloudflare One Connector: cloudflared Edit", "Cloudflare One Connectors Write", "Cloudflare One Connectors Edit"], account_scope)]
         if human_check and target == "write":
             account.append(group(["Turnstile Write", "Turnstile Edit"], account_scope))
         zone = [group(["DNS Read"] if target == "read" else ["DNS Write", "DNS Edit"], zone_scope), group(["Zone Read"], zone_scope)]
@@ -66,9 +70,13 @@ class TokenManager:
             pending_key = "pending_read_token" if target == "read" else "pending_business_token"
             if not all(re.fullmatch(r"[a-fA-F0-9]{32}", cfg[k]) for k in ("account_id", "zone_id")) or not cfg["zone_name"]:
                 raise ValueError("请先保存 Account ID、Zone ID 和 Zone 名称。")
+            if target == "write" and store.get("pending_browser_token"):
+                raise ValueError("浏览器令牌创建结果未知，请先在 Cloudflare 核对并手动接入。")
             authority = authority.strip() or store.secret("cf_token_authority")
             if not 10 <= len(authority) <= 4096:
                 raise ValueError("请提供 API Tokens Write 授权令牌。")
+            if not force_new and target == "write" and (store.get("managed_business_token") or {}).get("kind") == "account":
+                raise ValueError("当前是浏览器授权创建的账户令牌，请重新使用浏览器授权创建，或在 Cloudflare 账户 API Tokens 编辑权限。")
             groups = self.request(authority, "GET", "/user/tokens/permission_groups")
             policies = self.policies(groups, cfg, human_check, target)
             owned = None if force_new else store.get(record_key)

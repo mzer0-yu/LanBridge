@@ -52,6 +52,8 @@ class Cloudflare:
         self.service = service
 
     def request(self, method, path, body=None):
+        if "/challenges/widgets" in path and (self.service.store.get("managed_business_token") or {}).get("kind") == "account":
+            raise ValueError("Cloudflare 账户令牌目前不支持 Turnstile API。请手动配置 Turnstile Site/Secret Key，或使用具备 Turnstile 权限的用户令牌。")
         sensitive_read = path.endswith("/token") or "/challenges/widgets" in path
         credential = "cf_read_token" if method == "GET" and not sensitive_read else "cf_write_token"
         token = self.service.store.secret(credential)

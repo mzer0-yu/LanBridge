@@ -102,7 +102,7 @@ function invalidatePlan(){plan=null;$('#plan-content').hidden=true;$('#plan-empt
 function editSite(id){if(!state)return;if(!id&&!state.cloudflare_setup?.ready){locateSetup();toast(setupMessage(),true);return;}const site=state.sites.find(s=>s.id===id);const form=$('#site-form');form.reset();form.elements.id.value='';form.elements.hostname.readOnly=false;$('#site-error').textContent='';$('#site-dialog-title').textContent=site?'编辑网站与策略':'添加网站';if(site){for(const el of form.elements){if(!el.name||el.name==='passcode')continue;const v=site[el.name];if(el.type==='checkbox')el.checked=!!v;else el.value=Array.isArray(v)?v.join(', '):v??'';}form.elements.hostname.readOnly=true;}$('#site-dialog').showModal();}
 async function action(button,path,message,data={}){if(button.dataset.busy)throw Error('操作正在进行，请稍候');button.dataset.busy='true';button.disabled=true;try{const result=await api(path,data);if(state){for(const key of ['settings','credentials','cloudflare_setup','cloudflare_permission_issues'])if(result[key])state[key]=result[key];}if(message)toast(message);try{await loadState()}catch{if(state)render();toast('操作已完成，但状态刷新失败。请刷新状态，勿重复提交。',true)}return result}catch(e){toast(e.message,true);await loadState().catch(()=>{});throw e}finally{button.dataset.busy='';button.disabled=false;if(state)renderActionAvailability();}}
 $('#auth-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('#auth-submit');button.disabled=true;$('#auth-error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));if(!initialized){await api('setup',data);initialized=true;}const result=await api('login',data);csrf=result.csrf;e.target.elements.password.value='';openShell();}catch(err){$('#auth-error').textContent=err.message}finally{button.disabled=false}});
-document.addEventListener('click',async e=>{const el=e.target.closest('button');if(!el)return;if(el.dataset.copy){try{await navigator.clipboard.writeText($('#'+el.dataset.copy).textContent);toast('已复制，请按说明调整项目路径或账号')}catch{toast('复制失败，请手动选择示例内容复制',true)}}if(el.dataset.addSite){el.disabled=true;try{await $('#add-site').onclick()}finally{el.disabled=false}}if(el.dataset.view)go(el.dataset.view);if(el.dataset.goto)go(el.dataset.goto);if(el.dataset.setup)locateSetup(el.dataset.setup);if(el.dataset.tokenManager)locateTokenManager();if(el.dataset.tokenStep!==undefined)setTokenStep(Number(el.dataset.tokenStep));if(el.dataset.edit)editSite(el.dataset.edit);if(el.dataset.probe){try{const r=await action(el,'sites/'+el.dataset.probe+'/probe');toast(r.reachable?'源站可达 · HTTP '+r.http_status:'局域网源站暂不可达',!r.reachable)}catch{}}});
+document.addEventListener('click',async e=>{const el=e.target.closest('button');if(!el)return;if(el.dataset.copy){try{await navigator.clipboard.writeText($('#'+el.dataset.copy).textContent);toast('已复制，请按说明调整项目路径或账号')}catch{toast('复制失败，请手动选择示例内容复制',true)}}if(el.dataset.addSite){el.disabled=true;try{await $('#add-site').onclick()}finally{el.disabled=false}}if(el.dataset.view)go(el.dataset.view);if(el.dataset.goto)go(el.dataset.goto);if(el.dataset.setup)locateSetup(el.dataset.setup);if(el.dataset.tokenManager)locateTokenManager();if(el.dataset.browserAuthorize)await startBrowserAuthorization(el);if(el.dataset.tokenStep!==undefined)setTokenStep(Number(el.dataset.tokenStep));if(el.dataset.edit)editSite(el.dataset.edit);if(el.dataset.probe){try{const r=await action(el,'sites/'+el.dataset.probe+'/probe');toast(r.reachable?'源站可达 · HTTP '+r.http_status:'局域网源站暂不可达',!r.reachable)}catch{}}});
 $('#add-site').onclick=async()=>{const button=$('#add-site');button.disabled=true;try{await loadState();editSite();}catch(e){toast('无法检查配置，请刷新后重试：'+e.message,true)}finally{if(state)renderSetup();}};$('#close-dialog').onclick=$('#cancel-site').onclick=()=>$('#site-dialog').close();$('#refresh').onclick=()=>loadState().catch(e=>toast(e.message,true));
 $('#logout').onclick=async()=>{try{await api('logout',{});showAuth()}catch(e){toast(e.message,true)}};
 $('#shutdown').onclick=()=>{$('#shutdown-error').textContent='';$('#shutdown-dialog').showModal();};
@@ -163,7 +163,28 @@ function locateTokenManager(){
   form.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
+async function startBrowserAuthorization(button){
+  go('settings');
+  $('#browser-authorize').scrollIntoView({behavior:'smooth',block:'center'});
+  try{await action(button,'cloudflare/browser-authorize',null,{});}
+  catch(err){$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+}
+
+let browserAuthPoll;
+function renderBrowserAuth(){
+  const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
+  $("#browser-auth-status").textContent=job.message;
+  $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
+  for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
+    button.disabled=active||!!button.dataset.busy||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;
+    button.title=active?'浏览器授权正在进行':state.token_management?.pending?'先前创建结果未知，请先核对':!tokenTemplateURL(state.settings)||!state.settings.zone_name?'请先保存账户和域名配置':'授权后创建新令牌并切换本机凭据，保留 Cloudflare 中的旧令牌';
+  }
+  if(active&&!browserAuthPoll)browserAuthPoll=setInterval(()=>{if(state)loadState().catch(()=>{});else{clearInterval(browserAuthPoll);browserAuthPoll=null;}},2000);
+  if(!active&&browserAuthPoll){clearInterval(browserAuthPoll);browserAuthPoll=null;}
+}
+$("#browser-authorize").onclick=e=>startBrowserAuthorization(e.currentTarget);
 function renderTokenManager(){
+  renderBrowserAuth();
   const management=state.token_management||{},cfg=state.settings;
   const ready=!!tokenTemplateURL(cfg)&&!!cfg.zone_name;
   $('#token-manager-submit').disabled=!ready||!!management.pending||!!$('#token-manager-form').dataset.busy||!!$('#token-manager-submit').dataset.busy;
@@ -173,7 +194,8 @@ function renderTokenManager(){
   $('#token-create-read').disabled=!ready||busy||!!management.pending_read;
   $('#token-create-read').textContent='自动创建新只读 API Token';
   $('#token-repair-read').disabled=!ready||busy||!state.credentials.cf_read_token;
-  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token;
+  $('#token-repair-write').disabled=!ready||busy||!state.credentials.cf_write_token||management.managed?.kind==='account';
+  $('#token-repair-write').title=management.managed?.kind==='account'?'账户令牌请重新浏览器授权创建，或在 Cloudflare 账户 API Tokens 编辑':'为当前令牌补齐权限，保留令牌值';
   $('#token-manager-forget').disabled=busy;
   $('#read-manager-status').textContent=management.pending_read?'先前创建结果未知，请在 Cloudflare 核对 '+management.pending_read.name+'；平台不会重复创建。':management.managed_read?'只读令牌已托管，可自动更新权限。':state.credentials.cf_read_token?'只读令牌已保存，可选择修复当前权限。':'未配置只读令牌；创建后读取操作会使用它。';
   $('#token-manager-forget').hidden=!management.authority_saved;

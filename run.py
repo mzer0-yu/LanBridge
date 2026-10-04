@@ -74,6 +74,8 @@ def serve(service, open_browser=False):
         try:
             admin.run(sockets=[sockets[0]])
         finally:
+            if hasattr(service, "browser_auth"):
+                service.browser_auth.stop()
             service.connector.stop()
             gateway.should_exit = True
             thread.join(timeout=10)

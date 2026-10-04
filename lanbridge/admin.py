@@ -16,6 +16,9 @@ from pydantic import ValidationError
 
 def create_admin(service, shutdown=None):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    from .browser_auth import BrowserAuth
+    browser_auth = BrowserAuth(service)
+    service.browser_auth = browser_auth
     limiter = Limiter()
     ui = Path(__file__).resolve().parent.parent / "ui"
 
@@ -157,7 +160,8 @@ def create_admin(service, shutdown=None):
                 "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
                 "cloudflare_permission_issues": service.permission_issues(),
-                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
+                "browser_auth": browser_auth.status(),
+                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token") or service.store.get("pending_browser_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")
@@ -215,7 +219,7 @@ def create_admin(service, shutdown=None):
                     service.store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (k, value))
                 service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("credential_updated_at", json.dumps(changed)))
                 if "cf_write_token" in values:
-                    for key in ("managed_business_token", "pending_business_token"):
+                    for key in ("managed_business_token", "pending_business_token", "pending_browser_token"):
                         service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
                 if "cf_read_token" in values:
                     for key in ("managed_read_token", "pending_read_token"):
@@ -249,6 +253,8 @@ def create_admin(service, shutdown=None):
     async def cloudflare(action: str, request: Request):
         import asyncio
         data = await body(request)
+        if action == "browser-authorize":
+            return browser_auth.start()
         if action == "provision-token":
             from .token_manager import TokenManager
             if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool) or data.get("target", "write") not in ("write", "read") or not isinstance(data.get("repair_existing", False), bool) or not isinstance(data.get("force_new", False), bool):
