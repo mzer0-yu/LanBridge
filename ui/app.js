@@ -171,9 +171,14 @@ async function startBrowserAuthorization(button){
 }
 
 let browserAuthPoll;
+function browserAuthMessage(job){
+  if(job.phase!=='authorizing'||!Number.isFinite(job.updated_at))return job.message;
+  const seconds=Math.max(0,Math.ceil(120-(Date.now()/1000-job.updated_at)));
+  return job.message+(seconds>0?' 预计剩余约 '+seconds+' 秒。':' 等待已接近时限，正在确认授权结果；若浏览器回调连接失败，请等待本次任务结束后重新发起。');
+}
 function renderBrowserAuth(){
   const job=state.browser_auth||{phase:"idle",message:"登录 Cloudflare 后自动创建账户令牌。"},active=["preparing","authorizing","creating"].includes(job.phase);
-  $("#browser-auth-status").textContent=job.message;
+  $("#browser-auth-status").textContent=browserAuthMessage(job);
   $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
   for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
     button.disabled=active||!!button.dataset.busy||!tokenTemplateURL(state.settings)||!state.settings.zone_name||!!state.token_management?.pending;

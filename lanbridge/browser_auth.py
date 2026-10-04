@@ -82,11 +82,17 @@ class BrowserAuth:
         try:
             out, err = self.process.communicate(timeout=timeout)
             if self.process.returncode or self.cancelled.is_set():
+                if args[:2] == ["auth", "create"] and not self.cancelled.is_set():
+                    output = (out + err).decode("utf-8", errors="replace").lower()
+                    if "timed out waiting for authorization code" in output:
+                        raise ValueError("浏览器授权已超时：官方 CLI 的本机回调等待 2 分钟，8877 端口已关闭。未创建令牌；请关闭旧授权页，回到本平台重新发起授权，勿刷新旧回调地址。")
                 raise ValueError("Cloudflare 授权或 API 操作失败，请检查浏览器授权、账户的令牌创建权限及网络后重试。")
             return out.decode("utf-8", errors="replace").strip()
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.communicate()
+            if args[:2] == ["auth", "create"]:
+                raise ValueError("浏览器授权等待已结束，本机回调端口已关闭。未创建令牌；请回到本平台重新发起授权，勿刷新旧回调地址。") from None
             raise ValueError("Cloudflare 操作超时；若处于创建阶段，请先在 Cloudflare 核对结果，勿重复创建。") from None
         finally:
             self.process = None
@@ -135,7 +141,7 @@ class BrowserAuth:
                 env = self.environment(directory, cfg["account_id"])
                 scopes = SCOPES
                 try:
-                    self.update("authorizing", "已请求打开系统浏览器。请在 Cloudflare 官方页面登录并确认所列权限；完成后会自动创建令牌。")
+                    self.update("authorizing", "已请求打开系统浏览器。官方回调等待约 2 分钟；请确认权限并完成授权。超时后需重新发起，旧回调地址无法继续。")
                     self.run(command, env, directory, ["auth", "create", "lanbridge", "--no-device", "--scopes", *scopes], timeout=180)
                     self.update("creating", "授权已完成，正在核对权限并创建账户令牌…")
                     groups = self.payload(self.run(command, env, directory, ["accounts", "tokens", "permission-groups", "list", "--profile", "lanbridge"]))

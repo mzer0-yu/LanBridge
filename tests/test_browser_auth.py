@@ -114,3 +114,16 @@ def test_successful_login_without_selectable_tunnel_permissions_never_creates(br
     assert not any(args[:3] == ["accounts", "tokens", "create"] for args in calls)
     assert browser.service.store.secret("cf_write_token") == "old-business-secret"
     assert browser.service.store.get("pending_browser_token") is None
+
+
+def test_cli_callback_timeout_has_specific_safe_retry_guidance(browser, monkeypatch, tmp_path):
+    class Process:
+        returncode = 1
+        def communicate(self, timeout):
+            return b"", b"Timed out waiting for authorization code, please try again. secret-callback-code"
+    monkeypatch.setattr("lanbridge.browser_auth.subprocess.Popen", lambda *a, **kw: Process())
+    with pytest.raises(ValueError, match="8877") as error:
+        browser.run(["node", "cf"], {}, tmp_path, ["auth", "create", "lanbridge"])
+    assert "重新发起" in str(error.value) and "secret-callback-code" not in str(error.value)
+    assert browser.process is None
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"

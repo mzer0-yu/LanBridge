@@ -124,3 +124,11 @@ test('browser authorization launch failure stays visible next to its entry',asyn
   await context.startBrowserAuthorization({dataset:{}});
   assert.equal(status.textContent,'账户未配置');assert.equal(status.className,'form-feedback error');
 });
+
+test('authorization progress shows the wait limit and expired callback recovery',()=>{
+  const context={Date:{now:()=>1000000},Number,Math};vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function browserAuthMessage('),source.indexOf('function renderBrowserAuth(')),context);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:940,message:'授权中'}),/60 秒/);
+  assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新发起/);
+  assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
+});
