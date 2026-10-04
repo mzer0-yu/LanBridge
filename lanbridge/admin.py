@@ -30,7 +30,7 @@ def create_admin(service, shutdown=None):
             return JSONResponse({"detail": "管理台仅监听本机"}, 403)
         if request.method not in ("GET", "HEAD") and request.headers.get("origin") != "http://" + host:
             return JSONResponse({"detail": "请求来源校验失败"}, 403)
-        public = request.url.path in ("/", "/app.js", "/style.css", "/api/bootstrap", "/api/setup", "/api/login")
+        public = request.url.path in ("/", "/app.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login")
         session = service.store.session(request.cookies.get("lb_admin", ""))
         if not public and not session:
             return JSONResponse({"detail": "请登录管理员账户"}, 401)
@@ -76,6 +76,10 @@ def create_admin(service, shutdown=None):
     @app.get("/style.css")
     def style():
         return FileResponse(ui / "style.css")
+
+    @app.get("/favicon.svg")
+    def favicon():
+        return FileResponse(ui / "favicon.svg", media_type="image/svg+xml")
 
     @app.get("/api/bootstrap")
     def bootstrap(request: Request):
@@ -144,13 +148,16 @@ def create_admin(service, shutdown=None):
         managed = service.store.get("managed_business_token")
         if managed:
             managed = {k: v for k, v in managed.items() if k != "credential_digest"}
+        managed_read = service.store.get("managed_read_token")
+        if managed_read:
+            managed_read = {k: v for k, v in managed_read.items() if k != "credential_digest"}
         return {"settings": service.settings(), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
                 "published_hosts": service.store.get("published_hosts", []),
                 "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
                 "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": service.store.audit_list(),
                 "cloudflare_permission_issues": service.permission_issues(),
-                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "pending": service.store.get("pending_business_token"), "error": service.store.get("token_management_error")},
+                "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
 
     @app.post("/api/settings")
@@ -210,6 +217,9 @@ def create_admin(service, shutdown=None):
                 if "cf_write_token" in values:
                     for key in ("managed_business_token", "pending_business_token"):
                         service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
+                if "cf_read_token" in values:
+                    for key in ("managed_read_token", "pending_read_token"):
+                        service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
             service.store.audit("credentials_updated", {})
         return {"saved": True, "cloudflare_setup": service.cloudflare_setup(),
                 "cloudflare_permission_issues": service.permission_issues(),
@@ -241,9 +251,9 @@ def create_admin(service, shutdown=None):
         data = await body(request)
         if action == "provision-token":
             from .token_manager import TokenManager
-            if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool):
+            if not isinstance(data.get("authority", ""), str) or not isinstance(data.get("remember", False), bool) or not isinstance(data.get("human_check", True), bool) or data.get("target", "write") not in ("write", "read") or not isinstance(data.get("repair_existing", False), bool) or not isinstance(data.get("force_new", False), bool):
                 raise ValueError("授权令牌或选项格式无效")
-            return await asyncio.to_thread(TokenManager(service).provision, data.get("authority", ""), data.get("remember", False), data.get("human_check", True))
+            return await asyncio.to_thread(TokenManager(service).provision, data.get("authority", ""), data.get("remember", False), data.get("human_check", True), data.get("target", "write"), data.get("repair_existing", False), data.get("force_new", False))
         if action == "forget-token-authority":
             service.store.set_secret("cf_token_authority", "")
             return {"removed": True}

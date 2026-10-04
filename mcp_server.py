@@ -16,7 +16,7 @@ ROUTES = {
     "lanbridge_save_site": ("POST", "sites", SITE_SCHEMA, "保存网站与访问策略；缺少必填配置时拒绝新增", False),
     "lanbridge_prepare_connector": ("POST", "connector/ensure", EMPTY, "检测或从官方下载 cloudflared 并保存路径", False),
     "lanbridge_create_tunnel": ("POST", "cloudflare/create-tunnel", EMPTY, "创建 Tunnel 或恢复连接令牌", False),
-    "lanbridge_provision_token": ("POST", "cloudflare/provision-token", {"type": "object", "properties": {"human_check": {"type": "boolean"}}, "additionalProperties": False}, "使用管理台加密保存的 API Tokens Write 授权，创建或更新 LanBridge 托管业务令牌；不接受令牌文本", False),
+    "lanbridge_provision_token": ("POST", "cloudflare/provision-token", {"type": "object", "properties": {"human_check": {"type": "boolean"}, "target": {"type": "string", "enum": ["write", "read"]}, "repair_existing": {"type": "boolean"}, "force_new": {"type": "boolean"}}, "additionalProperties": False}, "使用本机已保存的 API Tokens Write 授权，创建或更新写入/只读令牌；repair_existing 显式修复当前保存令牌并保留原权限和限制；不接受令牌文本", False),
     "lanbridge_sync_turnstile": ("POST", "cloudflare/turnstile", EMPTY, "为已登记网站同步人类验证 Widget", False),
     "lanbridge_preview": ("POST", "cloudflare/preview", EMPTY, "读取并预览将发布的路由与 DNS", True),
     "lanbridge_apply": ("POST", "cloudflare/apply", {"type": "object", "properties": {"revision": {"type": "string", "minLength": 1}}, "required": ["revision"], "additionalProperties": False}, "发布指定预览 revision 并核验", False),

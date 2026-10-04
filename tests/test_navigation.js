@@ -53,7 +53,19 @@ test('unpublished default human-check option is preparation, not a security fail
 
 test('a replaced credential is awaiting verification instead of a current permission failure',()=>{
   const state=ready();state.cloudflare_permission_issues=[{status:'needs_recheck',detail:'Old 403'}];
-  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].textContent,'待核验');assert.equal(nodes['#settings-nav-status'].className,'nav-status neutral');assert.deepEqual(Array.from(marked(context)),[]);
+  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].textContent,'权限待核验');assert.equal(nodes['#settings-nav-status'].className,'nav-status neutral');assert.deepEqual(Array.from(marked(context)),[]);
+});
+
+test('permission and missing tunnel badges name distinct actions and recover independently',()=>{
+  const state=ready();state.settings.tunnel_id='';state.connector.running=false;state.credentials.tunnel_token=false;state.cloudflare_permission_issues=[{status:'last_failure',detail:'Cloudflare API HTTP 403：创建 Tunnel失败'}];
+  state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:false}];
+  const {context,nodes}=harness(state);context.renderNavigationIssues();
+  assert.equal(nodes['#settings-nav-status'].textContent,'权限待核验');assert.equal(nodes['#settings-nav-status'].hidden,false);
+  assert.equal(nodes['#connector-nav-status'].textContent,'待创建 Tunnel');
+  state.cloudflare_permission_issues=[];context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.equal(nodes['#connector-nav-status'].textContent,'待创建 Tunnel');
+  state.settings.tunnel_id='t';context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'待获取令牌');
+  state.credentials.tunnel_token=true;state.connector.installed=false;context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'待安装连接器');
+  state.connector.installed=true;state.connector.running=true;state.published_hosts=['app.example.com'];context.renderNavigationIssues();assert.equal(nodes['#connector-nav-status'].textContent,'运行中');
 });
 
 function asyncHarness(overrides={}){
