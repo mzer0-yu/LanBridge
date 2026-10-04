@@ -30,7 +30,7 @@ def create_admin(service, shutdown=None):
             return JSONResponse({"detail": "管理台仅监听本机"}, 403)
         if request.method not in ("GET", "HEAD") and request.headers.get("origin") != "http://" + host:
             return JSONResponse({"detail": "请求来源校验失败"}, 403)
-        public = request.url.path in ("/", "/app.js", "/style.css", "/api/bootstrap", "/api/setup", "/api/login")
+        public = request.url.path in ("/", "/app.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login")
         session = service.store.session(request.cookies.get("lb_admin", ""))
         if not public and not session:
             return JSONResponse({"detail": "请登录管理员账户"}, 401)
@@ -76,6 +76,10 @@ def create_admin(service, shutdown=None):
     @app.get("/style.css")
     def style():
         return FileResponse(ui / "style.css")
+
+    @app.get("/favicon.svg")
+    def favicon():
+        return FileResponse(ui / "favicon.svg", media_type="image/svg+xml")
 
     @app.get("/api/bootstrap")
     def bootstrap(request: Request):
