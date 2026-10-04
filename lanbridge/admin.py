@@ -108,7 +108,7 @@ def create_admin(service, shutdown=None):
             review = bool(publication and publication[0] == "publish_incomplete")
             routes = [{"name": site["name"], "hostname": site["hostname"], "origin": site["origin"],
                        "published": site["hostname"] in published,
-                       "status": "未发布" if site["hostname"] not in published else "待核验" if review else "已发布"}
+                       "status": "已暂停" if site.get("paused") else "未发布" if site["hostname"] not in published else "待核验" if review else "已发布"}
                       for site in service.sites() if site["enabled"]]
             return {"routes": routes, "updated_at": time.time()}
 
@@ -333,6 +333,12 @@ def create_admin(service, shutdown=None):
         result["origin"] = site["origin"]
         service.store.set("probe_" + site_id, result)
         return result
+
+    @app.post("/api/sites/{site_id}/pause")
+    async def pause_site(site_id: str, request: Request):
+        import asyncio
+        data = await body(request)
+        return await asyncio.to_thread(service.set_site_paused, site_id, data.get("paused"))
 
     @app.post("/api/cloudflare/{action}")
     async def cloudflare(action: str, request: Request):

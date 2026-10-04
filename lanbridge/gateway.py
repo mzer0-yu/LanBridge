@@ -164,6 +164,8 @@ def create_gateway(service):
         site = find_site(service, request)
         if not site:
             return Response("Not found", 404)
+        if site.get("paused"):
+            return Response("网站转发已暂停", 503, headers={"Cache-Control": "no-store"})
         if public_scheme(request) == "http":
             return RedirectResponse(str(request.url.replace(scheme="https", netloc=site["hostname"])), status_code=308)
         ip, country = visitor(request)
@@ -277,7 +279,7 @@ def create_gateway(service):
     async def websocket_proxy(ws: WebSocket, path: str):
         site = find_site(service, ws)
         ip, country = visitor(ws)
-        if not site or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
+        if not site or site.get("paused") or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
             await ws.close(code=1008)
             return
         if not limiter.allow((site["id"], ip, "request"), site["requests_per_minute"]):
@@ -321,7 +323,7 @@ def create_gateway(service):
                     while True:
                         await asyncio.sleep(2)
                         current = find_site(service, ws)
-                        if not current or current["policy_version"] != site["policy_version"]:
+                        if not current or current.get("paused") or current["policy_version"] != site["policy_version"]:
                             return
                         if (current["human_check"] or current["passcode_required"]) and not valid_pass(service, current, ip, ws.cookies.get(PASS_COOKIE, "")):
                             return

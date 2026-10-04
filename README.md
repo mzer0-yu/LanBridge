@@ -190,3 +190,7 @@ Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 C
 浏览器授权包含 `challenge-widgets.write`。启用人类验证的网站在授权完成后自动创建或同步专属 Widget，原子保存 Site Key 与加密 Secret Key。已有旧授权在点击“自动配置人类验证”后补充一次浏览器授权，随后自动完成配置。创建结果未知时按专属名称核对并恢复，禁止盲目重复创建；不改动其他项目的 Widget。手动更换写入令牌会清除本机 OAuth 凭据，切回令牌模式。
 
 API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI 授权说明](https://developers.cloudflare.com/cf/get-started/)。
+# 暂停与恢复网站
+
+在“网站管理”的网站操作中点击“暂停转发”或“恢复转发”，无需重新发布。暂停时网关停止处理该网站的新请求，已有 WebSocket 连接会在策略检查时关闭；已开始的 HTTP 响应不会强制中断。域名、Tunnel 路由和访问策略保留，其他网站不受影响。恢复后，受保护网站的访客需要重新验证。尚未发布的网站仍需先发布路由。
+

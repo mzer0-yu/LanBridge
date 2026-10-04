@@ -31,6 +31,8 @@ test('website publication status distinguishes pending publication, removal and 
   assert.equal(context.publicationStatus(site,current).label,'待发布');
   current.published_hosts=[site.hostname];assert.equal(context.publicationStatus(site,current).label,'已发布');
   current.publication_needs_review=true;assert.equal(context.publicationStatus(site,current).label,'待核验');
+  site.paused=true;assert.equal(context.publicationStatus(site,current).label,'已暂停');
+  site.paused=false;
   site.enabled=false;assert.equal(context.publicationStatus(site,current).label,'待停用');
   current.published_hosts=[];assert.equal(context.publicationStatus(site,current).label,'已停用');
 });

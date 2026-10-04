@@ -481,6 +481,8 @@ class Service:
             old = next((s for s in current if s["id"] == site["id"]), None)
             if site["id"] and not old:
                 raise ValueError("网站 ID 不存在")
+            if old and "paused" not in body:
+                site["paused"] = old.get("paused", False)
             if old and old["hostname"] != site["hostname"]:
                 raise ValueError("已有网站不可更改域名，请停用旧网站后新建")
             site["id"] = site["id"] or secrets.token_hex(8)
@@ -508,4 +510,21 @@ class Service:
             site["policy_version"] = secrets.token_hex(8)
             self.store.set("sites", proposed)
             self.store.audit("site_saved", {"id": site["id"], "hostname": site["hostname"], "enabled": site["enabled"]})
+            return site
+
+    def set_site_paused(self, site_id, paused):
+        if not isinstance(paused, bool):
+            raise ValueError("暂停状态必须为布尔值")
+        with self.lock:
+            sites = self.sites()
+            old = next((site for site in sites if site["id"] == site_id), None)
+            if not old:
+                raise ValueError("网站不存在")
+            if not old["enabled"]:
+                raise ValueError("网站已停用，请先编辑并启用网站")
+            if old.get("paused", False) == paused:
+                return old
+            site = old | {"paused": paused, "policy_version": secrets.token_hex(8)}
+            self.store.set("sites", [site if row["id"] == site_id else row for row in sites])
+            self.store.audit("site_paused" if paused else "site_resumed", {"id": site_id, "hostname": site["hostname"]})
             return site

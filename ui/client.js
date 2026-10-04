@@ -14,7 +14,7 @@ async function refresh(){
       card.querySelector('h2').textContent=route.name;
       const status=card.querySelector('.status');status.textContent=route.status;status.classList.toggle('pending',route.status!=='已发布');
       const link=card.querySelector('.public-url');link.textContent='https://'+route.hostname;
-      if(route.published)link.href='https://'+route.hostname;else{link.removeAttribute('href');link.setAttribute('aria-disabled','true');}
+      if(route.published&&route.status!=='已暂停')link.href='https://'+route.hostname;else{link.removeAttribute('href');link.setAttribute('aria-disabled','true');}
       card.querySelector('.origin').textContent=route.origin;routes.append(card);
     }
     document.getElementById('updated').textContent='更新于 '+new Date(data.updated_at*1000).toLocaleTimeString('zh-CN');error.hidden=true;

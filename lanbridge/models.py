@@ -11,6 +11,7 @@ class Site(BaseModel):
     hostname: str
     origin: str
     enabled: bool = True
+    paused: bool = False
     human_check: bool = True
     passcode_required: bool = False
     allowed_countries: list[str] = Field(default_factory=list)
