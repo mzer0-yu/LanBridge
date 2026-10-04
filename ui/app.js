@@ -31,7 +31,7 @@ function renderCredentialsGuide(){
   $('#write-token-editor').hidden=saved&&!replacingWriteToken;
   $('#write-token-cancel').hidden=!saved;
   $('#write-token-status').textContent=saved&&replacingWriteToken?'新令牌待保存':saved?'已保存':'待配置';
-  $('#token-wizard-title').textContent=saved?'更换写入令牌':'连接 Cloudflare · 配置写入令牌';
+  $('#token-wizard-title').textContent=saved?'更换写入 API Token':'连接 Cloudflare · 配置写入令牌';
   $('#token-account-summary').textContent=accountReady?'账户和域名已保存：'+state.settings.zone_name+'。创建页会使用已保存的账户和 Zone。':'请先在左侧填写并保存 Account ID、Zone ID 和 Zone 名称。无需先填写 Token。';
   $('#token-account-next').disabled=!accountReady;
   for(let i=0;i<3;i++){
