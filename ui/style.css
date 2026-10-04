@@ -52,3 +52,5 @@
 #token-manager-form{scroll-margin-top:24px}.permission-alert .button-row{align-items:center}.permission-alert .button-row button{white-space:normal;text-align:left}
 
 .sidebar-brand{gap:10px;letter-spacing:0}.sidebar-brand .brand-mark{width:40px;height:40px;flex:0 0 40px}.brand-copy{min-width:0;display:flex;flex-direction:column;gap:4px}.brand-copy strong{font-size:21px;line-height:1.2;letter-spacing:-.6px}.brand-purpose{margin:0;color:var(--muted);font-size:10.5px;line-height:1.4;letter-spacing:0;white-space:nowrap}
+
+.link-button{display:inline-flex;align-items:center;justify-content:center;border-radius:7px;padding:10px 17px;font-weight:600;line-height:1.6;text-decoration:none}.link-button:hover{text-decoration:none;filter:brightness(.96)}.link-button:focus-visible{outline:2px solid var(--green);outline-offset:3px}
