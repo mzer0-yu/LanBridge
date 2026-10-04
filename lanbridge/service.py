@@ -206,11 +206,11 @@ class Cloudflare:
         except (ValueError, KeyError, TypeError):
             return False
 
-    def create_widget(self):
+    def create_widget(self, sites=None):
         with self.service.lock:
             store = self.service.store
             cfg = self.service.settings()
-            hosts = sorted({s["hostname"] for s in self.service.sites() if s["enabled"] and s["human_check"]})
+            hosts = sorted({s["hostname"] for s in (self.service.sites() if sites is None else sites) if s["enabled"] and s["human_check"]})
             if not hosts:
                 raise ValueError("请先添加需要人类验证的网站")
             if not self.widgets_authorized():
@@ -468,7 +468,7 @@ class Service:
         if site["passcode_required"] and not self.store.secret("passcode_" + site["id"]):
             raise ValueError("请设置至少 12 位的网站访问口令")
 
-    def save_site(self, body):
+    def save_site(self, body, *, synchronize_verification=False):
         with self.lock:
             # Editing existing policies must remain possible even if credentials are unavailable.
             if not body.get("id"):
@@ -497,9 +497,15 @@ class Service:
             pinned_origin(site, cfg)
             if site["passcode_required"] and not hashed:
                 raise ValueError("需要设置网站口令")
+            proposed = [s for s in current if s["id"] != site["id"]] + [site]
+            if synchronize_verification and site["enabled"] and site["human_check"]:
+                try:
+                    self.cf.create_widget(sites=proposed)
+                except (ValueError, RuntimeError, OSError) as exc:
+                    raise ValueError("人类验证配置未完成，网站修改未保存：" + str(exc)) from None
             if passcode:
                 self.store.set_secret("passcode_" + site["id"], hashed)
             site["policy_version"] = secrets.token_hex(8)
-            self.store.set("sites", [s for s in current if s["id"] != site["id"]] + [site])
+            self.store.set("sites", proposed)
             self.store.audit("site_saved", {"id": site["id"], "hostname": site["hostname"], "enabled": site["enabled"]})
             return site

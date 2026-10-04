@@ -163,7 +163,7 @@ def main():
                 data = json.loads(args.file.read_text(encoding="utf-8-sig"))
                 if data.get("passcode_required"):
                     data["passcode"] = getpass.getpass("网站访问口令（新建至少 12 位，编辑留空保留）：")
-                result = service.save_site(data)
+                result = service.save_site(data, synchronize_verification=True)
             elif args.command == "status":
                 result = {"settings": service.settings(), "sites": service.sites(), "cloudflare": service.store.get("cloudflare_status"), "note": "连接器实时进程状态请查管理台 API"}
             elif args.command == "create-tunnel":

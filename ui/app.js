@@ -37,7 +37,8 @@ function renderHumanVerification(current){
   status.textContent=configured?'已配置':current.settings.turnstile_sitekey?'缺少密钥':'未配置';
   status.className='badge '+(configured?'success':'neutral');
   $('#widget-scope').textContent=hosts.length?'配置范围（已启用人类验证）：'+hosts.join('、'):'暂无启用人类验证的网站';
-  $('#widget-create').textContent=configured?'同步验证域名':'自动配置人类验证';
+  $('#widget-create').textContent='自动配置人类验证';
+  $('#widget-create').hidden=configured;
 }
 function renderCredentialsGuide(){
   const saved=!!state.credentials.cf_write_token;

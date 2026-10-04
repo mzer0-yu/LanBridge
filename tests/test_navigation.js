@@ -212,5 +212,5 @@ test('verification setup lists only enabled protected domains and leaves policie
   assert(nodes['#widget-scope'].textContent.includes('protected.example.com'));
   assert(!nodes['#widget-scope'].textContent.includes('public.example.com'));
   assert(!nodes['#widget-scope'].textContent.includes('disabled.example.com'));
-  assert.equal(nodes['#widget-create'].textContent,'同步验证域名');assert.equal(JSON.stringify(current),before);
+  assert.equal(nodes['#widget-create'].hidden,true);assert.equal(JSON.stringify(current),before);
 });
