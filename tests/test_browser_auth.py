@@ -237,3 +237,36 @@ def test_interrupted_cancellation_is_recoverable_after_service_restart(browser):
     browser.service.store.set("browser_auth_job",{"phase":"cancelling"})
     recovered=BrowserAuth(browser.service)
     assert recovered.status()["phase"]=="error"
+
+
+def test_consent_automatically_configures_human_check_without_exposing_keys(browser,monkeypatch):
+    browser.service.store.set("sites",[{"id":"site","enabled":True,"human_check":True,"hostname":"app.example.com"}])
+    calls=[]
+    monkeypatch.setattr(browser.service.cf,"create_widget",lambda:calls.append(True) or {"saved":True})
+    fake_login(browser,monkeypatch)
+    browser.start();browser.thread.join(timeout=5)
+    assert browser.status()["phase"]=="done" and calls==[True]
+    assert "challenge-widgets.write" in browser.service.store.get("managed_business_token")["scopes"]
+
+
+def test_old_oauth_requires_widget_consent_without_creating_pending_widget(browser):
+    data=snapshot();data["profile"]["scopes"]=[s for s in SCOPES if s!="challenge-widgets.write"]
+    browser.save_profile(data,browser.service.settings())
+    assert not browser.service.cf.widgets_authorized()
+    with pytest.raises(ValueError,match="缺少 Turnstile"):
+        browser.service.cf.request("POST","/accounts/"+"a"*32+"/challenges/widgets",{})
+    assert browser.service.store.get("pending_widget_create") is None
+
+
+def test_widget_auto_endpoint_starts_full_browser_consent_for_old_profile(browser,monkeypatch):
+    from fastapi.testclient import TestClient
+    from lanbridge.admin import create_admin
+    from lanbridge.store import password_hash
+    data=snapshot();data["profile"]["scopes"]=[s for s in SCOPES if s!="challenge-widgets.write"]
+    browser.save_profile(data,browser.service.settings())
+    browser.service.store.set("admin",{"username":"admin","password_hash":password_hash("correct horse battery")})
+    calls=[];monkeypatch.setattr(BrowserAuth,"start",lambda self:calls.append(True) or {"phase":"authorizing"})
+    client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
+    login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
+    r=client.post("/api/cloudflare/turnstile-auto",json={},headers={"X-CSRF-Token":login.json()["csrf"]})
+    assert r.status_code==200 and r.json()["phase"]=="authorizing" and calls==[True]

@@ -270,6 +270,10 @@ def create_admin(service, shutdown=None):
             return {"removed": True}
         if action == "create-tunnel":
             return await asyncio.to_thread(service.cf.create_tunnel)
+        if action == "turnstile-auto":
+            if not service.cf.widgets_authorized():
+                return browser_auth.start()
+            return await asyncio.to_thread(service.cf.create_widget)
         if action == "turnstile":
             return await asyncio.to_thread(service.cf.create_widget)
         if action == "preview":

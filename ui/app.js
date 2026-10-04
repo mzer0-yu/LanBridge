@@ -76,7 +76,7 @@ function setupProgress(current){
   const enabled=current.sites.filter(site=>site.enabled),cfg=current.settings;
   if(!enabled.length)return {title,detail:'现有网站均未启用，可在网站映射中调整。',label:'管理网站 →',next:'sites'};
   if(!cfg.tunnel_id)return {title,detail:'网站已登记，下一步创建 Tunnel，再发布网站映射。',label:'创建 Tunnel →',next:'connector'};
-  if(enabled.some(site=>site.human_check)&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))return {title,detail:'现有网站启用了人类验证，请先完成 Turnstile 密钥配置。',label:'配置人类验证 →',next:'security'};
+  if(enabled.some(site=>site.human_check)&&(!cfg.turnstile_sitekey||!current.credentials.turnstile_secret))return {title,detail:'现有网站启用了人类验证，请先完成 Turnstile 密钥配置。',label:'自动配置人类验证 →',next:'security'};
   const desired=enabled.map(site=>site.hostname).sort(),published=[...(current.published_hosts||[])].sort();
   if(current.publication_needs_review||JSON.stringify(desired)!==JSON.stringify(published))return {title,detail:'网站映射尚需发布或核对，请在连接器中预览并应用配置。',label:'发布网站映射 →',next:'connector'};
   const connector=connectorReadiness(current);
@@ -130,12 +130,19 @@ $('#cancel-shutdown').onclick=()=>$('#shutdown-dialog').close();
 $('#confirm-shutdown').onclick=async e=>{const button=e.currentTarget;button.disabled=true;$('#cancel-shutdown').disabled=true;try{await api('shutdown',{});$('#shutdown-dialog').close();showAuth();$('#auth').hidden=true;$('#platform-stopped').hidden=false;}catch(err){$('#shutdown-error').textContent='退出请求未确认：'+err.message+'。请检查平台是否仍在运行；也可在启动终端按 Ctrl+C。';}finally{button.disabled=false;$('#cancel-shutdown').disabled=false;}};
 $('#settings-form').oninput=e=>{e.currentTarget.dataset.dirty='true';$('#settings-feedback').textContent='有未保存的修改。';renderSetup();};
 $('#credentials-form').oninput=()=>{$('#credentials-feedback').textContent='凭据尚未保存，请点击“加密保存凭据”。';renderSetup();};
-$('#setup-progress-add').onclick=()=>{const next=$('#setup-progress-add').dataset.next;if(next==='add')return $('#add-site').onclick();if(next)go(next);};
+$('#setup-progress-add').onclick=()=>{const next=$('#setup-progress-add').dataset.next;if(next==='add')return $('#add-site').onclick();if(next==='security'){go(next);return $('#widget-create').onclick({currentTarget:$('#widget-create')});}if(next)go(next);};
 $('#settings-form').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,data=Object.fromEntries(new FormData(form));lockForm(form);try{await action(e.submitter,'settings','配置已保存',data);form.dataset.dirty='';invalidatePlan();await loadState().catch(()=>{});if(state)fillSettings();$('#settings-feedback').textContent='配置已保存。';}catch(err){$('#settings-feedback').textContent=err.message}finally{unlockForm(form);if(state)renderSetup();}};
 $('#credentials-form').onsubmit=async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));if(!Object.values(values).some(value=>String(value).trim())||(replacingWriteToken&&!String(values.cf_write_token||'').trim())){$('#credentials-feedback').textContent='请先粘贴要保存的新令牌；无需更换时点击取消更换。';if(!state.credentials.cf_write_token||replacingWriteToken)setTokenStep(2);return;}lockForm(e.target);try{await action(e.submitter,'credentials','凭据已加密保存',values);e.target.reset();replacingWriteToken=false;invalidatePlan();renderSetup();$('#credentials-feedback').textContent=state.cloudflare_setup.ready?'凭据已加密保存，现在可以添加网站。':'凭据已加密保存。'+setupMessage();}catch(err){$('#credentials-feedback').textContent=err.message}finally{unlockForm(e.target);if(state)renderSetup();}};
 $('#password-form').onsubmit=async e=>{e.preventDefault();try{await api('password',Object.fromEntries(new FormData(e.target)));e.target.reset();showAuth();toast('密码已修改，请重新登录')}catch(err){toast(err.message,true)}};
 $('#site-form').onsubmit=async e=>{e.preventDefault();const f=e.target;const data=Object.fromEntries(new FormData(f));for(const k of ['enabled','human_check','passcode_required'])data[k]=f.elements[k].checked;for(const k of ['allowed_countries','allowed_ips'])data[k]=data[k].split(/[,，\s]+/).filter(Boolean);for(const k of ['requests_per_minute','session_minutes'])data[k]=Number(data[k]);lockForm(f);try{await action(e.submitter,'sites','网站与本机访问策略已保存；路由变更请到连接器页发布',data);f.elements.passcode.value='';$('#site-dialog').close();invalidatePlan()}catch(err){$('#site-error').textContent=err.message}finally{unlockForm(f);}};
-for(const [id,path,msg] of [['widget-create','cloudflare/turnstile','Turnstile 已同步；可继续预览并发布'],['cf-check','cloudflare/check','已获取 Cloudflare 边缘状态'],['connector-start','connector/start','已启动连接器，请通过 API 核查边缘状态'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
+for(const [id,path,msg] of [['cf-check','cloudflare/check','已获取 Cloudflare 边缘状态'],['connector-start','connector/start','已启动连接器，请通过 API 核查边缘状态'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
+$('#widget-create').onclick=async e=>{
+  try{
+    const result=await action(e.currentTarget,'cloudflare/turnstile-auto',null,{});
+    if(['preparing','authorizing','creating'].includes(result.phase)){go('settings');$('#browser-authorize').scrollIntoView({behavior:'smooth',block:'center'});}
+    else toast('人类验证已自动配置，可继续预览并发布网站');
+  }catch{}
+};
 $('#preview').onclick=async e=>{invalidatePlan();try{plan=await action(e.currentTarget,'cloudflare/preview');$('#plan-json').textContent=JSON.stringify(plan,null,2);$('#plan-empty').hidden=true;$('#plan-content').hidden=false;}catch{}};
 $('#apply').onclick=async e=>{if(!plan)return;try{await action(e.currentTarget,'cloudflare/apply','路由与 DNS 写后核验通过，无需重启连接器',{revision:plan.revision});invalidatePlan()}catch{invalidatePlan()}};
 api('bootstrap').then(r=>{initialized=r.initialized;csrf=r.csrf;if(r.authenticated)openShell();else showAuth()}).catch(e=>$('#auth-error').textContent=e.message);

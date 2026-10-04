@@ -16,7 +16,7 @@ from .store import protect_directory
 from .service import digest
 
 VERSION = "1.0.0-beta.12"
-SCOPES = ["account:read", "argotunnel.write", "teams-connector-cloudflared.write", "dns.write", "zone.read"]
+SCOPES = ["account:read", "argotunnel.write", "teams-connector-cloudflared.write", "dns.write", "zone.read", "challenge-widgets.write"]
 
 
 class BrowserAuth:
@@ -181,7 +181,7 @@ class BrowserAuth:
                         raise ValueError("无法核对浏览器实际授予的权限范围；请重新发起浏览器授权。")
                     # Retain only our known scope names, never the identity/email or raw CLI output.
                     diagnostics = {"granted_scopes": [scope for scope in SCOPES if scope in granted]}
-                    needed = {"dns.write", "zone.read"}
+                    needed = {"dns.write", "zone.read", "challenge-widgets.write"}
                     missing = needed.difference(granted)
                     if not any(scope in granted for scope in ("argotunnel.write", "teams-connector-cloudflared.write")):
                         missing.add("Tunnel Write")
@@ -199,7 +199,10 @@ class BrowserAuth:
                         self.save_profile(snapshot, cfg)
                         store.set("token_management_error", None)
                         store.audit("browser_oauth_connected", {"account_id": cfg["account_id"], "zone_id": cfg["zone_id"]})
-                    self.update("done", "浏览器授权已接入并加密保存，凭据将自动刷新。Tunnel、DNS 与 Zone 操作直接使用此授权，无需再提供 API Tokens Write 令牌。")
+                    if any(site["enabled"] and site["human_check"] for site in self.service.sites()):
+                        self.update("creating", "授权已保存，正在自动创建或同步人类验证并加密保存密钥…")
+                        self.service.cf.create_widget()
+                    self.update("done", "浏览器授权已接入，凭据自动刷新；已为启用人类验证的网站自动配置 Turnstile，无需复制密钥。")
                 finally:
                     # Delete the isolated temporary files without revoking the persisted grant.
                     pass
@@ -261,7 +264,7 @@ class BrowserAuth:
     def save_profile(self, snapshot, cfg):
         store = self.service.store
         token = snapshot["profile"]["oauth_token"]
-        owned = {"kind": "oauth", "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "updated_at": time.time(), "credential_digest": digest(token)}
+        owned = {"kind": "oauth", "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "updated_at": time.time(), "credential_digest": digest(token), "scopes": [s for s in SCOPES if s in snapshot["profile"]["scopes"]]}
         with store.lock, store.db:
             for key, value in (("cf_write_token", token), ("cf_oauth_profile", json.dumps(snapshot))):
                 store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (key, store.cipher.encrypt(value.encode()).decode()))
