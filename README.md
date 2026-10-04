@@ -1,14 +1,14 @@
 # LanBridge · 局域网网页公网管理平台
 
-LanBridge 是运行在 Windows 的 Cloudflare 管理平台，用于将局域网网页发布到公网，并统一管理域名映射、人类验证、访问策略和连接器。支持网页管理、API 与 CLI 操作，以及配置预览、写后核验、凭据加密和操作审计。
+LanBridge 是运行在 Windows 的 Cloudflare 管理平台，用于将局域网网页发布到公网，并统一管理域名映射、人类验证、访问策略和连接器。提供网页管理及 CLI、API、MCP、SKILL 调用入口，支持配置预览、写后核验、凭据加密和操作日志。
 
 ## 打开平台
 
-当前电脑已安装项目独立虚拟环境和 cloudflared。双击项目目录中的 `start.cmd`，启动后自动打开管理页面 **http://127.0.0.1:8890/admin**。首次在页面设置管理员用户名和至少 12 位密码。也可以在 PowerShell 中运行 `start.ps1`。
+安装项目依赖后，双击项目目录中的 `start.cmd`，启动后自动打开管理页面 **http://127.0.0.1:8890/admin**。首次在页面设置管理员用户名和至少 12 位密码。也可以在 PowerShell 中运行 `start.ps1`。
 
 **网站入口页**：`http://127.0.0.1:8890/client` 无需登录，展示已启用网站的公网地址、局域网源站和发布状态，每 15 秒刷新。根地址跳转到此页面。只读接口为 `GET /api/client/routes`，不提供凭据或管理操作；此页面仍仅接受本机访问。管理 API 路径和 MCP 的服务基地址保持不变。
 
-已有管理员账户时，登录页提供“通过本机授权登录”。平台优先打开本机 Chrome；在外置浏览器登录管理员账户、核对两边的确认码并点击“允许登录”，发起请求的浏览器会自动登录。Chrome 已登录时无需再次输入密码；尚未登录时可使用 Chrome 保存的密码。
+已有管理员账户时，登录页提供“通过本机授权登录”。平台优先打开本机 Chrome；在外置浏览器登录管理员账户、核对两边的确认码并点击“允许登录”，发起请求的浏览器会自动登录。Chrome 已登录 LanBridge 管理员账户时无需再次输入密码；尚未登录时可使用 Chrome 保存的密码。
 
 本机授权请求有效期为 5 分钟，绑定发起浏览器的 HttpOnly Cookie，只能领取一次。可随时取消；拒绝、超时、重新发起、平台重启或管理员密码修改后，旧请求失效。授权页面必须由已登录的管理员确认，不能仅凭访问本机地址取得权限。
 
@@ -17,7 +17,7 @@ Set-Location <本项目目录>
 .\start.ps1
 ```
 
-管理台仅监听 `127.0.0.1:8890`，公网访问网关仅监听 `127.0.0.1:8891`，由 cloudflared 在本机连接。关闭平台会停止它自己启动的连接器。未配置系统服务或登录自启。Windows DPAPI 使用当前用户身份；请在当前用户终端运行，受限沙箱身份无法解密该用户的保险库。
+管理台仅监听 `127.0.0.1:8890`，网站转发网关仅监听 `127.0.0.1:8891`，由 cloudflared 在本机连接。关闭平台会停止它自己启动的连接器。未配置系统服务或登录自启。Windows DPAPI 使用当前用户身份；请在当前用户终端运行，受限沙箱身份无法解密该用户的保险库。
 
 **退出方式**：管理页面左侧选择“退出 LanBridge”，确认后停止管理台、访问网关和本平台启动的连接器；配置、凭据和云端资源保留。再次双击 `start.cmd` 可启动平台，连接器仍需按需要启动。“退出管理员”仅退出登录，服务和公网转发继续运行。终端启动时也可按 `Ctrl+C` 正常停止。关闭浏览器标签页不会停止平台。
 
@@ -25,15 +25,21 @@ Set-Location <本项目目录>
 
 ## 接入第一个网站
 
-1. 在“账户与配置”填写 Account ID、Zone ID、Zone 名称，例如 `example.com`。Zone 必须在该 Cloudflare 账户中，且状态为 Active。网站使用所配置域名下的子域名；已有冲突 DNS 时，平台拒绝覆盖。
-2. 在本机凭据表单填写受指定账户和 Zone 限制的 API Token。不要把令牌发到聊天、写入源代码或放在命令参数中。
-3. 添加网站，例如 `app.example.com` → `http://192.168.1.20:3000`。这台 Windows 电脑必须能访问该源站，源站 URL 不带路径。默认开启人类验证；可组合访问口令、国家/IP 白名单和限流。口令至少 12 位。
+1. 在“账户与配置”填写并保存 Account ID、Zone ID、Zone 名称，例如 `example.com`。Zone 必须属于该 Cloudflare 账户，且状态为 Active；公网入口必须是该 Zone 下的子域名。
+2. 点击“浏览器授权并自动配置”，在 Cloudflare 浏览器页面确认授权。平台核验权限与资源后保存 OAuth 凭据，无需手动复制 API Token。也可选择手动保存写入 API Token，或使用具有 API Tokens Write 权限的授权令牌创建业务令牌，详见下文。
+3. 在“网站管理”添加网站，例如 `app.example.com` → `http://192.168.1.20:3000`。这台电脑必须能访问源站，URL 不带路径。网页表单默认开启人类验证，允许国家预填 CN、HK、US、JP；可修改或留空不限。CLI/API 不传 allowed_countries 时默认不限。可组合至少 12 位访问口令、IP 白名单和限流。
+4. 保存启用人类验证的网站时，平台自动创建或更新专属 Managed Turnstile Widget，并加密保存 Secret，无需再点击同步域名。配置失败则保留原网站配置。关闭人类验证在保存后立即生效。检测到手工配置的 Widget 时，自动配置会停止并提示；本平台不会接管它的允许域名，需先自行处理或改用平台托管 Widget。
+5. 在“连接器”点击“创建隧道”。创建成功但读取连接令牌失败时，按钮变为“获取连接令牌”；结果未知时变为“核对并恢复隧道”，按记录的唯一名称核对，避免重复创建。完成后显示禁用的“隧道已配置”，需要重新读取令牌时展开“连接令牌维护”。默认 Tunnel 名称为 LanBridge，创建时追加随机标识。
+6. 点击“预览 Cloudflare 配置”，检查 ingress 和 DNS。存在变更时点击“发布变更并核验”，无变更时显示“核验现有路由”。平台对比预览 revision 后写入并核验，保留其他 hostname 路由及配置字段；冲突 DNS 不覆盖。
+7. 启动连接器并点击“通过 API 核查”。使用外部网络访问公网域名，验证真实人类验证、源站网页、应用登录、API 和 WebSocket。边缘连接核查不能替代端到端验证。
 
-添加网站前必须已保存 Account ID、Zone ID、Zone 名称和写入 API Token；缺少任一项时，“添加网站”按钮禁用；各管理页面持续显示缺少的字段，并提供“前往账户与配置”入口，不会打开新增表单。点击可用按钮后先刷新配置状态，再打开表单。API/CLI 同样拒绝创建。此检查表示必填配置已保存，实际令牌权限及 Zone Active 状态在云端操作时核验。Tunnel 和 Turnstile 可在登记网站后创建，不作为新增网站的前置条件。已有网站仍允许编辑和停用。
-4. 在“网站管理”保存启用人类验证的网站时，平台自动创建或更新专属 Managed Turnstile Widget 并加密保存 Secret，无需再次同步域名。配置失败时保留原网站配置；关闭人类验证在保存后立即生效。旧授权缺少权限时，在“账户与配置”补充浏览器授权后重新保存。手工配置的 Widget 仍需自行在 Cloudflare 管理允许域名，本平台不接管。
-5. 在“连接器”点击“创建隧道”。创建成功但令牌读取失败时，按钮改为“获取连接令牌”；创建结果未知时改为“核对并恢复隧道”，按唯一名称查找恢复，不重复创建。准备完成后显示不可重复点击的“隧道已配置”。仅需重新读取连接令牌时，展开“连接令牌维护”。平台在自定义名称后加随机标识，记录 ID 并加密保存连接令牌。
-6. 点击“预览 Cloudflare 配置”，检查 ingress 和将创建的 DNS；点击“应用此预览并核验”。平台重新读取远端配置及 DNS，对比 revision 后才写入。只管理平台登记的网站路由，保留其他 hostname 路由和配置字段，末尾为 `http_status:404`。
-7. 启动连接器，再点击“通过 API 核查”。使用外部网络打开公网域名，确认验证页面、源站网页、登录和 WebSocket 均正常。API 核查反映 Tunnel 边缘连接，不能替代实际公网端到端验证。
+新增网站前必须已保存 Account ID、Zone ID、Zone 名称及写入凭据；OAuth 接入也满足本机凭据存在检查。缺项时新增按钮禁用，页面提示具体字段。该检查不代表云端权限已核验，实际权限及 Zone Active 状态在云端操作时检查。已有网站仍可编辑、停用或暂停；Tunnel 不要求提前创建。保存开启人类验证的网站需要完成 Widget 配置，失败不会保存网站变更。
+
+## 暂停、恢复与停用
+
+在“网站管理”点击“暂停转发”或“恢复转发”，即时切换本机网关，无需重新发布。暂停保留域名、DNS、Tunnel 路由、源站及访问策略，不影响其他网站。新 HTTP 请求返回 503，WebSocket 握手被拒绝，已有 WebSocket 在约 2 秒的策略检查后关闭；已开始的 HTTP 响应不强制中断。恢复后受保护网站的访客需重新验证。尚未发布的路由仍需先发布，暂停或恢复不会自动发布路由、启动连接器。
+
+“编辑”中的“启用网站”与临时暂停不同：取消启用立即在本机拒绝请求，随后预览并发布会移除云端 ingress，DNS 保留。重新启用后如路由已被移除，需要再次发布。编辑其他字段不会自动取消暂停状态。网站列表和 `/client` 显示“已暂停”；入口页暂停时不提供可点击的访问链接。
 
 ## API 令牌权限
 
@@ -75,18 +81,20 @@ CLI run.py ───────────────────────
 | GET `/api/bootstrap` | 初始化和登录状态 |
 | POST `/api/setup`, `/api/login`, `/api/logout`, `/api/password` | 管理员账户与会话 |
 | POST `/api/shutdown` | 已登录管理员关闭本机平台，需要 Origin 与 CSRF 校验 |
-| GET `/api/state` | 配置、网站、凭据存在状态、连接器、上次边缘核验、审计 |
+| GET `/api/state` | 配置、网站、凭据存在状态、连接器、上次边缘核验、操作日志 |
 | POST `/api/settings`, `/api/credentials` | 设置与加密保存凭据 |
 | POST `/api/sites` | 新建/编辑网站；包含 id 时编辑，停用用 enabled=false |
+| POST `/api/sites/{id}/pause` | 临时暂停/恢复，JSON 为 `{"paused":true}` 或 `{"paused":false}`；仅适用于已启用网站 |
 | POST `/api/sites/{id}/probe` | 局域网源站探测 |
-| POST `/api/cloudflare/create-tunnel` | 创建Tunnel / 重试读取连接令牌 |
+| POST `/api/cloudflare/create-tunnel` | 创建、核对恢复隧道或重新读取连接令牌 |
 | POST `/api/cloudflare/turnstile` | 创建/更新平台拥有的 Widget 域名 |
 | POST `/api/cloudflare/preview` | 读取并预览配置，返回 revision |
 | POST `/api/cloudflare/apply` | 提交 `{ "revision": "预览返回值" }`，写后核验 |
 | POST `/api/cloudflare/check` | 查询实际 Tunnel 边缘状态 |
+| POST `/api/connector/ensure` | 检测或下载 cloudflared，`{}` 使用保存路径，`{"path":""}` 自动检测 |
 | POST `/api/connector/start`, `/api/connector/stop` | 管理本平台的连接器进程 |
 
-除初始化与登录外，管理 API 需要 Cookie 会话。所有 POST 需要 `Origin: http://127.0.0.1:8890`，已登录的 POST 还需要 `/api/login` 返回的 `X-CSRF-Token`。POST 发送 JSON，无字段的操作发送 `{}`。未提供任意 Cloudflare API 透传接口。
+公共只读接口 `/api/bootstrap`、`/api/client/routes`，以及初始化、登录和本机授权登录的发起/轮询/取消接口不要求管理员会话。其余管理接口需要管理员 Cookie 会话；本机授权登录的领取还须匹配发起浏览器 Cookie，确认授权须已登录管理员。所有 POST 需要 `Origin: http://127.0.0.1:8890`，受会话保护的 POST 还需要 `/api/login` 返回的 `X-CSRF-Token`。POST 发送 JSON，无字段的操作发送 `{}`。未提供任意 Cloudflare API 透传接口。
 
 ```powershell
 .\.venv\Scripts\python.exe run.py capabilities
@@ -101,7 +109,7 @@ CLI run.py ───────────────────────
 .\.venv\Scripts\python.exe run.py serve
 ```
 
-配置示例需先填入自己的账户、Zone 和域名。所有密钥通过隐藏输入。CLI 输出 `lanbridge-result/v1` JSON，失败退出码 1。运行中的平台持有独占锁，此时从管理台/API 修改；CLI `status` 可只读，其他 CLI 操作需先停止平台。使用另一个 `--data-dir` 可以独立配置另一个账户和端口。
+配置示例需先填入自己的账户、Zone 和域名。所有密钥通过隐藏输入。CLI 输出 `lanbridge-result/v1` JSON，失败退出码 1。运行中的平台持有独占锁，此时从管理台/API 修改；CLI `capabilities` 不访问数据，`status` 可只读查看本机配置；其余命令持有运行锁，需先停止平台。`status` 不代表连接器实时运行状态，应通过管理 API 核查。使用另一个 `--data-dir` 可以独立配置另一个账户和端口。
 
 网站 JSON 示例：
 
@@ -113,7 +121,8 @@ CLI run.py ───────────────────────
   "human_check": true,
   "passcode_required": false,
   "enabled": true,
-  "allowed_countries": ["CN", "HK"],
+  "paused": false,
+  "allowed_countries": ["CN", "HK", "US", "JP"],
   "allowed_ips": [],
   "requests_per_minute": 180,
   "session_minutes": 60
@@ -157,25 +166,25 @@ MCP 客户端配置中的 command 指向本项目 `.venv/Scripts/python.exe`，a
 
 官方安装来源：[Cloudflare cloudflared 下载说明](https://developers.cloudflare.com/tunnel/downloads/)。
 
-## 自动配置业务 API Token
+## 使用授权令牌管理 API Token（可选）
 
-账户与配置页提供“自动配置 API Token”。首次打开 Cloudflare 用户 API Tokens 页面，使用 **Create Additional Tokens** 模板创建具有 **API Tokens Write** 权限的授权令牌。它不同于 Account API Tokens Write；当前入口使用用户令牌 API。
+这是独立于浏览器 OAuth 接入的可选令牌管理流程。账户与配置页提供“自动配置 API Token”；需要此流程时，打开 Cloudflare 用户 API Tokens 页面，使用 **Create Additional Tokens** 模板创建具有 **API Tokens Write** 权限的授权令牌。它不同于 Account API Tokens Write；当前入口使用用户令牌 API。
 
 输入授权令牌后，平台从 API 获取权限组 ID，自动创建限定当前 Account ID 的 Tunnel Write 和限定当前 Zone ID 的 DNS Write、Zone Read 业务令牌；可选择 Turnstile Write。业务令牌加密保存，不返回页面。授权令牌默认仅用于本次请求，勾选记住后独立加密保存，也可从界面移除本机副本。授权令牌可管理用户 API 令牌，应妥善保管。
 
-写入和只读令牌分别管理。只读令牌自动创建 Tunnel Read、DNS Read 和 Zone Read 权限，限定当前账户及 Zone，不改变写入令牌。再次点击创建入口会更新该类型已经托管的令牌。新建会替换本机使用的凭据，旧令牌不会从 Cloudflare 删除。
+写入和只读令牌分别管理。只读令牌自动创建 Tunnel Read、DNS Read 和 Zone Read 权限，限定当前账户及 Zone，不改变写入令牌。网页“自动创建新 API Token”始终创建新令牌并替换该类型的本机凭据，旧令牌不会从 Cloudflare 删除。API/MCP/CLI 未指定 force_new 时，已有受托管用户令牌会更新；没有时才新建。
 
 “修复当前写入/只读令牌权限”用于已经保存的用户令牌：先用该令牌验证 ID，再由授权令牌读取远端详情，新增当前账户及 Zone 所需权限，保留原有权限（包括拒绝策略）、名称、有效期、生效时间、IP 条件和状态，不更换令牌值。它不会移除原有写权限来强制变成纯只读。无法验证、账户令牌、其他用户令牌或无法读取权限时停止操作；可改用创建新令牌。有效期、IP 限制或原有拒绝策略造成的失败不会自动解除，更新后请重试业务操作核验。
 
 手动替换或移除凭据会解除对应托管。两种令牌分别记录未知创建结果并阻止重复 POST，页面展示唯一名称供核对；可通过手动配置接入已有令牌。移除本机授权不撤销 Cloudflare 中的令牌。
 
 - CLI：`run.py provision-token`，通过隐藏提示输入授权；`--target read` 配置只读令牌，默认 write；`--repair-existing` 修复对应的当前令牌；`--remember` 保存授权，`--without-turnstile` 不授予 Turnstile。CLI 写操作要求先停止管理服务。
-- API：`POST /api/cloudflare/provision-token`，需要管理员会话、Origin 和 CSRF；字段 `authority`、`remember`、`human_check`、`target`（write/read）、`repair_existing`（默认 false）。`POST /api/cloudflare/forget-token-authority` 移除本机授权。
-- MCP：`lanbridge_provision_token`，仅使用管理台已加密保存的授权，可传 `human_check`、`target`、`repair_existing`，不接受令牌文本。
+- API：`POST /api/cloudflare/provision-token`，需要管理员会话、Origin 和 CSRF；字段 `authority`、`remember`、`human_check`、`target`（write/read）、`repair_existing`、`force_new`（后两项默认 false）。`POST /api/cloudflare/forget-token-authority` 移除本机授权。
+- MCP：`lanbridge_provision_token`，仅使用管理台已加密保存的授权，可传 `human_check`、`target`、`repair_existing`、`force_new`，不接受令牌文本。
 
-参考：https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/
+参考：[通过 Cloudflare API 创建令牌](https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/)。
 
-自动创建新令牌入口始终新建并加密保存，即使已有托管令牌；成功后切换本机凭据，旧令牌不会删除。API/MCP 使用 `force_new: true`，CLI 使用 `--force-new`；不可与 `repair_existing` 同时使用。创建结果未知时仍禁止重复创建。
+需要强制新建时，API/MCP 使用 `force_new: true`，CLI 使用 `--force-new`；不可与 `repair_existing` 同时使用。创建结果未知时禁止重复创建，先核对云端资源。
 
 ## 浏览器授权接入 Cloudflare
 
@@ -190,7 +199,3 @@ Node.js 22.18+ 必需；首次使用可通过 npm/pnpm 从官方 npm 源安装 C
 浏览器授权包含 `challenge-widgets.write`。启用人类验证的网站在授权完成后自动创建或同步专属 Widget，原子保存 Site Key 与加密 Secret Key。已有旧授权在点击“自动配置人类验证”后补充一次浏览器授权，随后自动完成配置。创建结果未知时按专属名称核对并恢复，禁止盲目重复创建；不改动其他项目的 Widget。手动更换写入令牌会清除本机 OAuth 凭据，切回令牌模式。
 
 API：`POST /api/cloudflare/browser-authorize`（管理员会话、Origin、CSRF），后台执行；`GET /api/state` 的 browser_auth 返回进度，不含秘密。参考 [官方 CLI 授权说明](https://developers.cloudflare.com/cf/get-started/)。
-# 暂停与恢复网站
-
-在“网站管理”的网站操作中点击“暂停转发”或“恢复转发”，无需重新发布。暂停时网关停止处理该网站的新请求，已有 WebSocket 连接会在策略检查时关闭；已开始的 HTTP 响应不会强制中断。域名、Tunnel 路由和访问策略保留，其他网站不受影响。恢复后，受保护网站的访客需要重新验证。尚未发布的网站仍需先发布路由。
-
