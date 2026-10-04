@@ -34,6 +34,7 @@ def test_external_confirmation_logs_in_only_the_bound_browser_once(browsers):
     job = start(requester)
     data = {'request_id': job['request_id']}
     assert opened == [job['approval_url']]
+    assert '/admin#local-login=' in job['approval_url']
     assert requester.get('/api/local-login/request/'+job['request_id']).status_code == 401
     assert requester.post('/api/local-login/poll', json=data).json()['phase'] == 'pending'
     details = approver.get('/api/local-login/request/'+job['request_id']).json()

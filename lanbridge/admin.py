@@ -5,7 +5,7 @@ import time
 
 import httpx
 from fastapi import FastAPI, Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.background import BackgroundTask
 from .gateway import Limiter
 from .models import Settings
@@ -36,7 +36,7 @@ def create_admin(service, shutdown=None):
             return JSONResponse({"detail": "管理台仅监听本机"}, 403)
         if request.method not in ("GET", "HEAD") and request.headers.get("origin") != "http://" + host:
             return JSONResponse({"detail": "请求来源校验失败"}, 403)
-        public = request.url.path in ("/", "/app.js", "/local-login.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login", "/api/local-login/start", "/api/local-login/poll", "/api/local-login/cancel")
+        public = request.url.path in ("/", "/admin", "/admin/", "/client", "/client/", "/client.js", "/client.css", "/api/client/routes", "/app.js", "/local-login.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login", "/api/local-login/start", "/api/local-login/poll", "/api/local-login/cancel")
         session = service.store.session(request.cookies.get("lb_admin", ""))
         if not public and not session:
             return JSONResponse({"detail": "请登录管理员账户"}, 401)
@@ -73,7 +73,44 @@ def create_admin(service, shutdown=None):
 
     @app.get("/")
     def index():
+        return RedirectResponse("/client", status_code=307)
+
+    @app.get("/admin")
+    def admin_page():
         return FileResponse(ui / "index.html")
+
+    @app.get("/admin/")
+    def admin_slash():
+        return RedirectResponse("/admin", status_code=307)
+
+    @app.get("/client")
+    def client_page():
+        return FileResponse(ui / "client.html")
+
+    @app.get("/client/")
+    def client_slash():
+        return RedirectResponse("/client", status_code=307)
+
+    @app.get("/client.js")
+    def client_script():
+        return FileResponse(ui / "client.js")
+
+    @app.get("/client.css")
+    def client_style():
+        return FileResponse(ui / "client.css")
+
+    @app.get("/api/client/routes")
+    def client_routes():
+        with service.lock:
+            published = set(service.store.get("published_hosts", []))
+            with service.store.lock:
+                publication = service.store.db.execute("SELECT action FROM audit WHERE action IN ('publish_verified','publish_incomplete') ORDER BY id DESC LIMIT 1").fetchone()
+            review = bool(publication and publication[0] == "publish_incomplete")
+            routes = [{"name": site["name"], "hostname": site["hostname"], "origin": site["origin"],
+                       "published": site["hostname"] in published,
+                       "status": "未发布" if site["hostname"] not in published else "待核验" if review else "已发布"}
+                      for site in service.sites() if site["enabled"]]
+            return {"routes": routes, "updated_at": time.time()}
 
     @app.get("/app.js")
     def script():
@@ -138,7 +175,7 @@ def create_admin(service, shutdown=None):
         if not limiter.allow("local_login_start", 10):
             return JSONResponse({"detail": "请求过于频繁，请稍后重试"}, 429)
         request_id, proof, details = local_login.start(request.cookies.get(COOKIE, ""))
-        url = f'http://127.0.0.1:{service.settings()["admin_port"]}/#local-login={request_id}'
+        url = f'http://127.0.0.1:{service.settings()["admin_port"]}/admin#local-login={request_id}'
         opened = await asyncio.to_thread(open_browser, url)
         response = JSONResponse(details | {"request_id": request_id, "approval_url": url, "browser_opened": opened})
         response.set_cookie(COOKIE, proof, httponly=True, samesite="strict", max_age=LIFETIME, path="/api/local-login")

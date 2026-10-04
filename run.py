@@ -56,7 +56,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
         gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], proxy_headers=False, access_log=False, log_level="warning"))
         thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
         thread.start()
-        print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}  |  网关：127.0.0.1:{cfg["gateway_port"]}', flush=True)
+        print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}/admin  |  网关：127.0.0.1:{cfg["gateway_port"]}', flush=True)
         print("Cloudflare 连接器需在管理台手动启动；点击“退出 LanBridge”或按 Ctrl+C 停止本平台及其连接器。", flush=True)
         admin = None
         def shutdown():
@@ -71,7 +71,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
                 while not admin.started and not admin.should_exit:
                     time.sleep(0.1)
                 if admin.started and not admin.should_exit:
-                    webbrowser.open(f'http://127.0.0.1:{cfg["admin_port"]}')
+                    webbrowser.open(f'http://127.0.0.1:{cfg["admin_port"]}/admin')
             threading.Thread(target=show_browser, daemon=True).start()
         try:
             admin.run(sockets=[sockets[0]])
