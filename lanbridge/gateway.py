@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import base64
-from collections import OrderedDict, deque
+from collections import OrderedDict
 import hashlib
 import hmac
 import html
@@ -101,16 +101,94 @@ class Limiter:
     def allow(self, key, count, window=60):
         now = time.monotonic()
         with self.lock:
-            bucket = self.buckets.setdefault(key, deque())
+            bucket = self.buckets.get(key)
+            if bucket is None and len(self.buckets) >= 10000:
+                oldest = next(iter(self.buckets))
+                if now - self.buckets[oldest][0] < window:
+                    return False
+                self.buckets.pop(oldest)
+            if bucket is None or now - bucket[0] >= window:
+                bucket = [now, 0]
+                self.buckets[key] = bucket
             self.buckets.move_to_end(key)
-            while bucket and bucket[0] <= now - window:
-                bucket.popleft()
             while len(self.buckets) > 10000:
                 self.buckets.popitem(last=False)
-            if len(bucket) >= count:
+            if bucket[1] >= count:
                 return False
-            bucket.append(now)
+            bucket[1] += 1
             return True
+
+
+class ResourceLimits:
+    """Bound active work before reading bodies; hold slots until sending finishes."""
+    def __init__(self, app, http=128, websocket=32, verify=8, per_ip=16, rate=100, burst=200):
+        self.app = app
+        self.limits = {"http": http, "websocket": websocket, "verify": verify}
+        self.active = {kind: 0 for kind in self.limits}
+        self.peers = {}
+        self.per_ip = per_ip
+        self.rate, self.burst, self.tokens, self.updated = rate, burst, burst, time.monotonic()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in {"http", "websocket"}:
+            return await self.app(scope, receive, send)
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.updated) * self.rate)
+        self.updated = now
+        if self.tokens < 1:
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1013})
+            else:
+                await Response("请求过于频繁，请稍后重试", 429, headers={"Retry-After": "1", "Cache-Control": "no-store"})(scope, receive, send)
+            return
+        self.tokens -= 1
+        kind = "verify" if scope["type"] == "http" and scope["path"] == PREFIX + "/verify" else scope["type"]
+        ip, _ = visitor(Request(scope) if scope["type"] == "http" else WebSocket(scope, receive, send))
+        key = (kind, ip)
+        peer_limit = min(self.per_ip, 2 if kind == "verify" else 4 if kind == "websocket" else self.per_ip)
+        if self.active[kind] >= self.limits[kind] or self.peers.get(key, 0) >= peer_limit:
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1013})
+            else:
+                await Response("网关繁忙，请稍后重试", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})(scope, receive, send)
+            return
+        self.active[kind] += 1
+        self.peers[key] = self.peers.get(key, 0) + 1
+        async def bounded_send(message):
+            with anyio.fail_after(120):
+                await send(message)
+        try:
+            await self.app(scope, receive, bounded_send)
+        finally:
+            self.active[kind] -= 1
+            self.peers[key] -= 1
+            if not self.peers[key]:
+                del self.peers[key]
+
+
+class BufferBudget:
+    """Reserve declared response bytes, including buffers held by slow consumers."""
+    def __init__(self, total=512 * 1024 * 1024, single=256 * 1024 * 1024):
+        self.total, self.single, self.used = total, single, 0
+
+    def reserve(self, size):
+        if size > self.single or self.used + size > self.total:
+            return False
+        self.used += size
+        return True
+
+
+async def bounded_body(request, maximum=4096, seconds=10):
+    length = request.headers.get("content-length")
+    if length is not None and (not length.isdigit() or int(length) > maximum):
+        raise OverflowError()
+    body = bytearray()
+    with anyio.fail_after(seconds):
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > maximum:
+                raise OverflowError()
+            body.extend(chunk)
+    return bytes(body)
 
 
 def signed_pass(service, site, ip):
@@ -225,6 +303,7 @@ form.onsubmit=e=>{e.preventDefault();submitVerification()};
 def create_gateway(service):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     limiter = Limiter()
+    budget = BufferBudget()
 
     async def policy(request):
         site = find_site(service, request)
@@ -261,15 +340,17 @@ def create_gateway(service):
         if not limiter.allow((site["id"], ip, "verify"), 5):
             return JSONResponse({"detail": "验证过于频繁，请稍后重试"}, 429, headers={"Retry-After": "60"})
         try:
-            raw = await request.body()
-            if len(raw) > 4096:
-                return Response(status_code=413)
+            raw = await bounded_body(request)
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise ValueError()
+        except OverflowError:
+            return Response(status_code=413)
+        except TimeoutError:
+            return Response(status_code=408)
         except ValueError:
             return JSONResponse({"detail": "验证请求无效"}, 400)
-        if site["passcode_required"] and not password_check(str(body.get("passcode", "")), service.store.secret("passcode_" + site["id"])):
+        if site["passcode_required"] and not await anyio.to_thread.run_sync(password_check, str(body.get("passcode", "")), service.store.secret("passcode_" + site["id"])):
             return JSONResponse({"detail": "口令不正确"}, 403)
         if site["human_check"]:
             token = body.get("token", "")
@@ -292,7 +373,7 @@ def create_gateway(service):
     async def proxy(request: Request, path: str):
         site = request.state.site
         try:
-            base, host, sni = await asyncio.to_thread(pinned_origin, site, service.settings())
+            base, host, sni = await anyio.to_thread.run_sync(pinned_origin, site, service.settings())
         except ValueError:
             return Response("源站配置不可用", 502)
         length = request.headers.get("content-length", "0")
@@ -312,11 +393,12 @@ def create_gateway(service):
         client = httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10), follow_redirects=False, trust_env=False)
         async def limited_body():
             size = 0
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > 32 * 1024 * 1024:
-                    raise ValueError("body_too_large")
-                yield chunk
+            with anyio.fail_after(120):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > 32 * 1024 * 1024:
+                        raise ValueError("body_too_large")
+                    yield chunk
         try:
             has_body = int(length) > 0 or bool(request.headers.get("transfer-encoding"))
             upstream = await client.send(client.build_request(request.method, target, headers=headers, content=limited_body() if has_body else None, extensions={"sni_hostname": sni}), stream=True)
@@ -326,6 +408,13 @@ def create_gateway(service):
         except httpx.HTTPError:
             await client.aclose()
             return Response("局域网源站暂不可用", 502)
+        except TimeoutError:
+            await client.aclose()
+            return Response("上传超时", 408)
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
+            raise
         response_headers = []
         for k, v in filtered_headers(upstream.headers):
             if k.lower() == "location" and (v.startswith(site["origin"] + "/") or v == site["origin"]):
@@ -349,53 +438,75 @@ def create_gateway(service):
         no_body = request.method == "HEAD" or upstream.status_code in (204, 304) or upstream.status_code < 200
         request.state.transfer["upstream_length"] = declared
         if declared is not None and not no_body:
+            if not declared.isdigit() or not budget.reserve(int(declared)):
+                await close()
+                return Response("响应缓冲容量不足，请稍后重试或缩小下载", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})
+            reserved = int(declared)
+            released = False
+            def release_buffer():
+                nonlocal released
+                if not released:
+                    released = True
+                    budget.used -= reserved
             # Verify the raw encoded representation before forwarding a successful status.
             # Memory is bounded to 1 MiB; larger downloads spill to the protected data directory.
-            spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=service.store.root)
+            try:
+                spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=service.store.root)
+            except BaseException:
+                release_buffer()
+                await close()
+                raise
             try:
                 if not declared.isdigit():
                     raise ValueError("invalid_response_length")
                 disconnected, stream_error = False, None
-                async with anyio.create_task_group() as tasks:
-                    async def watch_disconnect():
-                        nonlocal disconnected
-                        while True:
-                            if (await request.receive())["type"] == "http.disconnect":
-                                disconnected = True
-                                tasks.cancel_scope.cancel()
-                                return
-                    tasks.start_soon(watch_disconnect)
-                    try:
-                        async for chunk in tracked_body():
-                            await asyncio.to_thread(spool.write, chunk)
-                    except (httpx.HTTPError, ValueError) as exc:
-                        stream_error = exc
-                    finally:
-                        tasks.cancel_scope.cancel()
+                with anyio.fail_after(300):
+                    async with anyio.create_task_group() as tasks:
+                        async def watch_disconnect():
+                            nonlocal disconnected
+                            while True:
+                                if (await request.receive())["type"] == "http.disconnect":
+                                    disconnected = True
+                                    tasks.cancel_scope.cancel()
+                                    return
+                        tasks.start_soon(watch_disconnect)
+                        try:
+                            async for chunk in tracked_body():
+                                if request.state.transfer["read"] > reserved:
+                                    raise ValueError("invalid_response_length")
+                                await anyio.to_thread.run_sync(spool.write, chunk)
+                        except (httpx.HTTPError, ValueError, OSError) as exc:
+                            stream_error = exc
+                        finally:
+                            tasks.cancel_scope.cancel()
                 if disconnected:
                     request.state.transfer["upstream_error"] = "ClientDisconnect"
                     spool.close()
+                    release_buffer()
                     return Response(status_code=499)
                 if stream_error:
                     raise stream_error
                 if request.state.transfer["read"] != int(declared):
                     raise ValueError("incomplete_response")
-                await asyncio.to_thread(spool.seek, 0)
-            except (httpx.HTTPError, ValueError) as exc:
+                await anyio.to_thread.run_sync(spool.seek, 0)
+            except (httpx.HTTPError, ValueError, TimeoutError, OSError) as exc:
                 request.state.transfer["upstream_error"] = type(exc).__name__
                 spool.close()
+                release_buffer()
                 return Response("源站响应未完整接收，请重试", 502, headers={"Cache-Control": "no-store"})
             except BaseException:
                 spool.close()
+                release_buffer()
                 raise
             finally:
                 with anyio.CancelScope(shield=True):
                     await close()
             async def buffered_body():
-                while chunk := await asyncio.to_thread(spool.read, 65536):
+                while chunk := await anyio.to_thread.run_sync(spool.read, 65536):
                     yield chunk
             async def close_spool():
                 spool.close()
+                release_buffer()
             response = OwnedStreamingResponse(buffered_body(), close=close_spool, status_code=upstream.status_code)
         else:
             response = OwnedStreamingResponse(tracked_body(), close=close, status_code=upstream.status_code)
@@ -409,6 +520,9 @@ def create_gateway(service):
         if not site or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
             await ws.close(code=1008)
             return
+        if ws.headers.get("origin") and ws.headers["origin"] != "https://" + site["hostname"]:
+            await ws.close(code=1008)
+            return
         if not limiter.allow((site["id"], ip, "request"), site["requests_per_minute"]):
             await ws.close(code=1008)
             return
@@ -417,9 +531,9 @@ def create_gateway(service):
             return
         sock = None
         try:
-            base, host, sni = await asyncio.to_thread(pinned_origin, site, service.settings())
+            base, host, sni = await anyio.to_thread.run_sync(pinned_origin, site, service.settings())
             u = urlsplit(base)
-            sock = await asyncio.to_thread(socket.create_connection, (u.hostname, u.port), 10)
+            sock = await anyio.to_thread.run_sync(socket.create_connection, (u.hostname, u.port), 10)
             sock.setblocking(False)
             raw_path = ws.scope.get("raw_path", ws.url.path.encode()).decode("ascii")
             query = ws.scope.get("query_string", b"").decode("ascii")
@@ -431,7 +545,7 @@ def create_gateway(service):
                 headers["Cookie"] = cookies
             protocols = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
             async with websockets.connect(uri, sock=sock, additional_headers=headers, origin=ws.headers.get("origin"),
-                                          subprotocols=protocols or None, max_size=8 * 1024 * 1024,
+                                          subprotocols=protocols or None, max_size=8 * 1024 * 1024, max_queue=2,
                                           **({"server_hostname": sni} if u.scheme == "https" else {})) as remote:
                 await ws.accept(subprotocol=remote.subprotocol)
                 async def to_remote():
@@ -439,7 +553,11 @@ def create_gateway(service):
                         message = await ws.receive()
                         if message["type"] == "websocket.disconnect":
                             break
-                        await remote.send(message.get("bytes") if message.get("bytes") is not None else message.get("text", ""))
+                        value = message.get("bytes") if message.get("bytes") is not None else message.get("text", "")
+                        if len(value if isinstance(value, bytes) else value.encode()) > 8 * 1024 * 1024:
+                            await ws.close(code=1009)
+                            return
+                        await remote.send(value)
                 async def to_browser():
                     async for message in remote:
                         if isinstance(message, bytes):
@@ -473,5 +591,6 @@ def create_gateway(service):
             if sock:
                 sock.close()
     app.add_middleware(PolicyMiddleware, check=policy)
+    app.add_middleware(ResourceLimits)
     app.add_middleware(TransferLog)
     return app

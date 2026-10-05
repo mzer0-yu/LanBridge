@@ -53,7 +53,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
             sock.bind(("127.0.0.1", port))
             sock.listen(128)
             sockets.append(sock)
-        gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], proxy_headers=False, access_log=False, log_level="warning"))
+        gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], limit_concurrency=192, ws_max_size=8 * 1024 * 1024, ws_max_queue=2, h11_max_incomplete_event_size=16384, proxy_headers=False, access_log=False, log_level="warning"))
         thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
         thread.start()
         print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}/admin  |  网关：127.0.0.1:{cfg["gateway_port"]}', flush=True)
