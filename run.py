@@ -43,6 +43,8 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
     import uvicorn
     from lanbridge.admin import create_admin
     from lanbridge.gateway import create_gateway
+    from lanbridge.gateway_log import configure_runtime_logging
+    runtime_log = configure_runtime_logging(service.store.root)
     cfg = service.settings()
     sockets = []
     try:
@@ -53,7 +55,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
             sock.bind(("127.0.0.1", port))
             sock.listen(128)
             sockets.append(sock)
-        gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], limit_concurrency=192, ws_max_size=8 * 1024 * 1024, ws_max_queue=2, h11_max_incomplete_event_size=16384, proxy_headers=False, access_log=False, log_level="warning"))
+        gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], limit_concurrency=192, ws_max_size=8 * 1024 * 1024, ws_max_queue=2, h11_max_incomplete_event_size=16384, proxy_headers=False, access_log=False, log_config=None, timeout_graceful_shutdown=8, log_level="warning"))
         thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
         thread.start()
         print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}/admin  |  网关：127.0.0.1:{cfg["gateway_port"]}', flush=True)
@@ -61,7 +63,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
         admin = None
         def shutdown():
             admin.should_exit = True
-        admin = uvicorn.Server(uvicorn.Config(create_admin(service, shutdown), host="127.0.0.1", port=cfg["admin_port"], proxy_headers=False, access_log=False, log_level="warning"))
+        admin = uvicorn.Server(uvicorn.Config(create_admin(service, shutdown), host="127.0.0.1", port=cfg["admin_port"], proxy_headers=False, access_log=False, log_config=None, timeout_graceful_shutdown=8, log_level="warning"))
         if authorize_cloudflare:
             service.browser_auth.start()
         if open_browser:
@@ -84,6 +86,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
     finally:
         for sock in sockets:
             sock.close()
+        runtime_log.close()
 
 
 def main():

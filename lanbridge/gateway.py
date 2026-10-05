@@ -23,6 +23,9 @@ import websockets
 
 from .service import pinned_origin
 from .store import password_check
+from .upstream import UpstreamPools
+from .gateway_log import transfer_logger
+from contextlib import asynccontextmanager
 
 PASS_COOKIE = "__Host-lanbridge-pass"
 PREFIX = "/.lanbridge"
@@ -31,14 +34,16 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
 
 class TransferLog:
     """Correlate response framing failures without logging cookies or query strings."""
-    def __init__(self, app):
+    def __init__(self, app, logger=None):
         self.app = app
+        self.logger = logger or logging.getLogger("uvicorn.error")
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         transfer = {"id": secrets.token_hex(8), "sent": 0, "read": 0, "status": None,
                     "length": None, "encoding": None, "complete": False}
+        started = time.monotonic()
         scope.setdefault("state", {})["transfer"] = transfer
         failure = None
         async def tracked_send(message):
@@ -57,13 +62,15 @@ class TransferLog:
             failure = type(exc).__name__
             raise
         finally:
-            if failure or transfer.get("upstream_error") or transfer["sent"] >= 1024 * 1024 or (transfer["status"] and not transfer["complete"]):
-                logging.getLogger("uvicorn.error").warning("gateway_transfer %s", json.dumps({
-                    "request_id": transfer["id"], "method": scope["method"], "path": scope["path"],
+            if failure or transfer.get("upstream_error") or transfer["sent"] >= 1024 * 1024 or (transfer["status"] and (transfer["status"] >= 500 or not transfer["complete"])):
+                self.logger.warning("gateway_transfer %s", json.dumps({
+                    "request_id": transfer["id"], "method": scope["method"], "path": scope["path"][:1024],
                     "status": transfer["status"], "content_length": transfer["length"],
                     "content_encoding": transfer["encoding"], "upstream_bytes": transfer["read"],
                     "upstream_length": transfer.get("upstream_length"), "upstream_error": transfer.get("upstream_error"),
-                    "downstream_bytes": transfer["sent"], "complete": transfer["complete"], "error": failure}))
+                    "downstream_bytes": transfer["sent"], "complete": transfer["complete"], "error": failure,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+                    "upstream_headers_ms": transfer.get("upstream_headers_ms")}))
 
 
 class PolicyMiddleware:
@@ -175,6 +182,20 @@ class BufferBudget:
         if size > self.single or self.used + size > self.total:
             return False
         self.used += size
+        return True
+
+
+class TokenBudget:
+    def __init__(self, rate, burst):
+        self.rate, self.burst, self.tokens, self.updated = rate, burst, burst, time.monotonic()
+
+    def allow(self, cost=1):
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.updated) * self.rate)
+        self.updated = now
+        if cost > self.tokens:
+            return False
+        self.tokens -= cost
         return True
 
 
@@ -301,7 +322,16 @@ form.onsubmit=e=>{e.preventDefault();submitVerification()};
 
 
 def create_gateway(service):
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    pools = UpstreamPools()
+    logger, log_handler = transfer_logger(service.store.root)
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            async with pools.lifespan(app):
+                yield
+        finally:
+            log_handler.close()
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     limiter = Limiter()
     budget = BufferBudget()
 
@@ -390,7 +420,12 @@ def create_gateway(service):
         # Keep known body lengths; do not manufacture chunked uploads for bodyless requests.
         if "content-length" in request.headers:
             headers.append(("content-length", length))
-        client = httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10), follow_redirects=False, trust_env=False)
+        try:
+            connection_auth = request.headers.get("authorization", "").strip().lower().startswith(("ntlm ", "negotiate "))
+            transport = await pools.borrow((site["id"], base, host, sni), isolated=connection_auth)
+        except httpx.PoolTimeout:
+            return Response("源站连接繁忙，请稍后重试", 503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
+        client = httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(120, connect=10, pool=1), follow_redirects=False, trust_env=False)
         async def limited_body():
             size = 0
             with anyio.fail_after(120):
@@ -401,10 +436,15 @@ def create_gateway(service):
                     yield chunk
         try:
             has_body = int(length) > 0 or bool(request.headers.get("transfer-encoding"))
+            started = time.monotonic()
             upstream = await client.send(client.build_request(request.method, target, headers=headers, content=limited_body() if has_body else None, extensions={"sni_hostname": sni}), stream=True)
+            request.state.transfer["upstream_headers_ms"] = round((time.monotonic() - started) * 1000, 2)
         except ValueError:
             await client.aclose()
             return Response("请求内容过大", 413)
+        except httpx.PoolTimeout:
+            await client.aclose()
+            return Response("源站连接繁忙，请稍后重试", 503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
         except httpx.HTTPError:
             await client.aclose()
             return Response("局域网源站暂不可用", 502)
@@ -438,7 +478,11 @@ def create_gateway(service):
         no_body = request.method == "HEAD" or upstream.status_code in (204, 304) or upstream.status_code < 200
         request.state.transfer["upstream_length"] = declared
         if declared is not None and not no_body:
-            if not declared.isdigit() or not budget.reserve(int(declared)):
+            if not declared.isdigit():
+                request.state.transfer["upstream_error"] = "InvalidContentLength"
+                await close()
+                return Response("源站响应长度无效", 502, headers={"Cache-Control": "no-store"})
+            if not budget.reserve(int(declared)):
                 await close()
                 return Response("响应缓冲容量不足，请稍后重试或缩小下载", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})
             reserved = int(declared)
@@ -548,18 +592,28 @@ def create_gateway(service):
                                           subprotocols=protocols or None, max_size=8 * 1024 * 1024, max_queue=2,
                                           **({"server_hostname": sni} if u.scheme == "https" else {})) as remote:
                 await ws.accept(subprotocol=remote.subprotocol)
+                message_budgets = [TokenBudget(200, 400), TokenBudget(200, 400)]
+                byte_budgets = [TokenBudget(2 * 1024 * 1024, 8 * 1024 * 1024), TokenBudget(2 * 1024 * 1024, 8 * 1024 * 1024)]
+                def allowed_message(value, direction):
+                    size = len(value if isinstance(value, bytes) else value.encode())
+                    return size <= 8 * 1024 * 1024 and message_budgets[direction].allow() and byte_budgets[direction].allow(size)
                 async def to_remote():
                     while True:
                         message = await ws.receive()
                         if message["type"] == "websocket.disconnect":
                             break
                         value = message.get("bytes") if message.get("bytes") is not None else message.get("text", "")
-                        if len(value if isinstance(value, bytes) else value.encode()) > 8 * 1024 * 1024:
-                            await ws.close(code=1009)
+                        if not allowed_message(value, 0):
+                            logger.warning("websocket_limit %s", json.dumps({"hostname": site["hostname"], "direction": "visitor"}))
+                            await ws.close(code=1008)
                             return
                         await remote.send(value)
                 async def to_browser():
                     async for message in remote:
+                        if not allowed_message(message, 1):
+                            logger.warning("websocket_limit %s", json.dumps({"hostname": site["hostname"], "direction": "upstream"}))
+                            await ws.close(code=1008)
+                            return
                         if isinstance(message, bytes):
                             await ws.send_bytes(message)
                         else:
@@ -592,5 +646,5 @@ def create_gateway(service):
                 sock.close()
     app.add_middleware(PolicyMiddleware, check=policy)
     app.add_middleware(ResourceLimits)
-    app.add_middleware(TransferLog)
+    app.add_middleware(TransferLog, logger=logger)
     return app

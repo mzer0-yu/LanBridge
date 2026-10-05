@@ -110,6 +110,17 @@ def test_buffer_rejection_then_full_download_recovers(streaming_gateway, monkeyp
         assert response.status_code == 200 and response.content == payload
 
 
+def test_parallel_large_downloads_preserve_complete_bytes(streaming_gateway):
+    import httpx
+    url, headers, payload, _, _ = streaming_gateway
+    async def run():
+        async with httpx.AsyncClient(headers=headers, trust_env=False, timeout=30) as client:
+            responses = await asyncio.gather(*(client.get(url + "/json") for _ in range(8)))
+        assert all(r.status_code == 200 and r.content == payload for r in responses)
+        assert len({r.headers["x-lanbridge-request-id"] for r in responses}) == 8
+    asyncio.run(run())
+
+
 def test_websocket_cross_site_origin_rejected(service):
     from starlette.websockets import WebSocketDisconnect
     service.save_site({"name": "socket", "hostname": "app.example.com", "origin": "http://127.0.0.1:9300", "human_check": False})

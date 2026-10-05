@@ -91,20 +91,20 @@ def test_large_response_wire_bytes_and_slow_consumer(streaming_gateway, path, sl
         assert int(head.headers["content-length"]) == len(payload)
 
 
-def test_upstream_disconnect_is_correlated_to_its_request(streaming_gateway, caplog):
-    caplog.set_level("WARNING", logger="uvicorn.error")
+def test_upstream_disconnect_is_correlated_to_its_request(streaming_gateway, service):
     url, headers, _, _, _ = streaming_gateway
     with httpx.Client(headers=headers, trust_env=False, timeout=30) as client:
         response = client.get(url + "/broken")
         assert response.status_code == 502
         assert len(response.content) == int(response.headers["content-length"])
     for _ in range(50):
-        if '"path": "/broken"' in caplog.text: break
+        text = (service.store.root / "gateway.log").read_text(encoding="utf-8") if (service.store.root / "gateway.log").exists() else ""
+        if '"path": "/broken"' in text: break
         time.sleep(.02)
-    assert '"path": "/broken"' in caplog.text
-    assert '"upstream_bytes": 1048576' in caplog.text
-    assert '"upstream_error": "RemoteProtocolError"' in caplog.text
-    assert 'Too little data for declared Content-Length' not in caplog.text
+    assert '"path": "/broken"' in text
+    assert '"upstream_bytes": 1048576' in text
+    assert '"upstream_error": "RemoteProtocolError"' in text
+    assert 'Too little data for declared Content-Length' not in text
 
 
 def test_full_csv_with_slow_consumer(streaming_gateway):
