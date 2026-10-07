@@ -18,13 +18,14 @@ def unused_port():
 
 
 @pytest.mark.parametrize('change_gateway', [False, True])
-def test_authenticated_shutdown_exits_servers_and_releases_runtime_lock(tmp_path, change_gateway):
+@pytest.mark.parametrize('startup_selection', [False, True])
+def test_authenticated_shutdown_exits_servers_and_releases_runtime_lock(tmp_path, change_gateway, startup_selection):
     service = Service(tmp_path)
     admin_port, gateway_port = unused_port(), unused_port()
     while admin_port == gateway_port:
         gateway_port = unused_port()
     cfg = service.settings() | {"admin_port": admin_port, "gateway_port": gateway_port}
-    service.store.set("settings", cfg)
+    service.store.set("settings", cfg if not startup_selection else cfg | {'admin_port': 8890, 'gateway_port': 8891})
     if change_gateway:
         replacement = unused_port()
         while replacement in (admin_port, gateway_port):
@@ -34,7 +35,10 @@ def test_authenticated_shutdown_exits_servers_and_releases_runtime_lock(tmp_path
     service.store.set_secret("cf_write_token", "test-preserved-token")
     service.store.db.close()
     project = Path(__file__).resolve().parents[1]
-    process = subprocess.Popen([sys.executable, str(project / "run.py"), "--data-dir", str(tmp_path), "serve"],
+    command = [sys.executable, str(project / "run.py"), "--data-dir", str(tmp_path), "serve"]
+    if startup_selection:
+        command += ['--admin-port', str(admin_port), '--gateway-port', str(gateway_port)]
+    process = subprocess.Popen(command,
                                cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     url = f"http://127.0.0.1:{admin_port}"
     try:

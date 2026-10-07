@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import sys
 import threading
+from urllib.parse import urlsplit
 
 from lanbridge.service import Service
 from lanbridge.models import Settings
@@ -39,16 +40,30 @@ def acquire_runtime(root):
     return handle
 
 
-def serve(service, open_browser=False, authorize_cloudflare=False):
+def startup_settings(service, admin_port=None, gateway_port=None):
+    cfg = service.settings()
+    pending = service.store.get("pending_gateway_port")
+    cfg = Settings(**(cfg | {
+        "admin_port": admin_port if admin_port is not None else cfg["admin_port"],
+        "gateway_port": gateway_port if gateway_port is not None else pending or cfg["gateway_port"],
+    })).model_dump()
+    for site in service.sites():
+        if site.get("target") != "lanbridge":
+            origin = urlsplit(site["origin"])
+            port = origin.port or (443 if origin.scheme == "https" else 80)
+            if port in (cfg["admin_port"], cfg["gateway_port"]):
+                raise ValueError("所选端口与网站源站端口相同，请选择其他端口，避免转发循环。")
+    return cfg
+
+
+def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=None, gateway_port=None):
     import uvicorn
     from lanbridge.admin import create_admin
     from lanbridge.gateway import create_gateway
     from lanbridge.gateway_log import configure_runtime_logging
+    cfg = startup_settings(service, admin_port, gateway_port)
     runtime_log = configure_runtime_logging(service.store.root)
-    cfg = service.settings()
-    pending_port = service.store.get("pending_gateway_port")
-    if pending_port:
-        cfg = Settings(**(cfg | {"gateway_port": pending_port})).model_dump()
+    pending_port = service.store.get("pending_gateway_port") if gateway_port is None else None
     sockets = []
     try:
         for port in (cfg["admin_port"], cfg["gateway_port"]):
@@ -60,20 +75,33 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
             except OSError:
                 if not pending_port or port != pending_port:
                     sock.close()
-                    raise
-                cfg = service.settings()
+                    role = "管理台" if port == cfg["admin_port"] else "转发网关"
+                    raise ValueError(f"{role}端口 {port} 无法绑定（被占用或系统保留），请在启动器中修改端口后重试。") from None
+                cfg = startup_settings(service, admin_port, service.settings()["gateway_port"])
                 pending_port = None
-                sock.bind(("127.0.0.1", cfg["gateway_port"]))
+                try:
+                    sock.bind(("127.0.0.1", cfg["gateway_port"]))
+                except OSError:
+                    sock.close()
+                    raise ValueError(f'转发网关端口 {cfg["gateway_port"]} 无法绑定，请在启动器中修改端口后重试。') from None
                 print("待启用网关端口被占用，继续使用原端口；请在管理台选择其他端口。", flush=True)
             sock.listen(128)
             sockets.append(sock)
-        if pending_port:
-            if not service.store.get("previous_gateway_port"):
-                service.store.set("previous_gateway_port", service.settings()["gateway_port"])
-            service.store.set("settings", cfg)
-            service.store.set("pending_gateway_port", None)
-            if cfg["tunnel_id"]:
-                service.store.set("publication_error", "本机网关端口已修改，请在网站转发中点击重试发布，同步云端路由")
+        previous = service.settings()
+        if cfg != previous or gateway_port is not None or pending_port:
+            values = {"settings": cfg, "pending_gateway_port": None}
+            if cfg["admin_port"] != previous["admin_port"]:
+                values["sites"] = [
+                    dict(site, origin=f'http://127.0.0.1:{cfg["admin_port"]}')
+                    if site.get("target") == "lanbridge" else site
+                    for site in service.store.get("sites", [])
+                ]
+            gateway_changed = cfg["gateway_port"] != previous["gateway_port"]
+            if gateway_changed and not service.store.get("previous_gateway_port"):
+                values["previous_gateway_port"] = previous["gateway_port"]
+            if gateway_changed and cfg["tunnel_id"]:
+                values["publication_error"] = "本机网关端口已修改，请在网站转发中点击重试发布，同步云端路由"
+            service.store.set_many(values)
         gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], limit_concurrency=192, ws_max_size=8 * 1024 * 1024, ws_max_queue=2, h11_max_incomplete_event_size=16384, proxy_headers=False, access_log=False, log_config=None, timeout_graceful_shutdown=8, log_level="warning"))
         thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
         thread.start()
@@ -115,6 +143,8 @@ def main():
     sub.add_parser("capabilities")
     server = sub.add_parser("serve")
     server.add_argument("--open-browser", action="store_true")
+    server.add_argument("--admin-port", type=int, help="启动前选择管理台端口（1024–65535），成功绑定后保存")
+    server.add_argument("--gateway-port", type=int, help="启动前选择转发网关端口（1024–65535），成功绑定后保存")
     server.add_argument("--authorize-cloudflare", action="store_true", help="启动后打开官方浏览器授权，自动配置启用人类验证的网站")
     sub.add_parser("status")
     sub.add_parser("setup-admin")
@@ -151,7 +181,7 @@ def main():
         lock = acquire_runtime(service.store.root) if args.command != "status" else None
         try:
             if args.command == "serve":
-                serve(service, args.open_browser, args.authorize_cloudflare)
+                serve(service, args.open_browser, args.authorize_cloudflare, args.admin_port, args.gateway_port)
                 return 0
             if args.command == "setup-admin":
                 if service.store.get("admin"):
@@ -204,7 +234,7 @@ def main():
                     data["passcode"] = getpass.getpass("网站访问口令（新建至少 12 位，编辑留空保留）：")
                 result = service.save_site(data, synchronize_verification=True)
             elif args.command == "status":
-                result = {"settings": service.settings(), "sites": service.sites(), "cloudflare": service.store.get("cloudflare_status"), "note": "连接器实时进程状态请查管理台 API"}
+                result = {"settings": service.settings(), "pending_gateway_port": service.store.get("pending_gateway_port"), "sites": service.sites(), "cloudflare": service.store.get("cloudflare_status"), "note": "连接器实时进程状态请查管理台 API"}
             elif args.command == "create-tunnel":
                 result = service.cf.create_tunnel()
             elif args.command == "provision-token":

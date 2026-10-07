@@ -6,7 +6,7 @@ LanBridge 是面向 Windows 的自托管 Cloudflare Tunnel 管理工具。把 NA
 
 **首个正式版本：v1.0.0** · [下载 Release](https://github.com/mzer0-yu/LanBridge/releases/tag/v1.0.0) · [使用指南](docs/user-guide.md) · [反馈问题](https://github.com/mzer0-yu/LanBridge/issues)
 
-> 代码公开，当前未授予开源许可。使用、修改或分发前请联系作者，详见 [版权说明](COPYRIGHT.md)。本项目不是 Cloudflare 官方产品。
+> 采用 [MIT 许可证](LICENSE)，欢迎使用、修改、分享和参与开发。本项目不是 Cloudflare 官方产品。
 
 ![LanBridge 管理台示例](docs/assets/overview.png)
 
@@ -45,7 +45,7 @@ LanBridge 转发的是网页和所选协议流量，不提供通用 VPN 或任�
 
    如果 `python` 不在 PATH，用 `-PythonPath "C:\Path\To\python.exe"` 指定 Python。
 
-3. 双击 **`start.cmd`**，浏览器会打开 [本机管理台](http://127.0.0.1:8890/admin)。首次创建管理员账户，使用独立的长密码。
+3. 双击 **`start.cmd`**，在启动器中确认或修改管理台端口和转发网关端口，点击“启动并打开管理台”。端口成功绑定后自动保存并打开浏览器，首次创建管理员账户，使用独立的长密码。
 4. 在“账户与配置”接入 Cloudflare。可使用浏览器授权，或提供所需权限的 API Token；凭据在本机保存。
 5. 到“网站转发”添加网站，例如 `demo.example.com` → `http://192.168.1.20:8080`，按需要设置访问保护，然后启动连接器并核查连接。
 6. 用外网浏览器访问自己的子域名，验证网页、应用登录和需要的 WebSocket 功能。
@@ -76,7 +76,7 @@ cloudflared 路径可以留空，平台可检测或从官方发布下载连接�
 
 **关闭浏览器会停止转发吗？** 不会。运行服务和连接器继续工作；“退出管理员”只注销会话，“退出 LanBridge”会停止平台及其启动的连接器。
 
-**能给朋友直接用吗？** 可以先分享这个项目让朋友了解功能。当前尚未授予使用、修改或再分发许可，实际使用请联系作者确认。
+**能给朋友直接用吗？** 可以。项目采用 MIT 许可证，朋友可以按安装说明使用，也可以修改和分享；须保留版权与许可声明。
 
 **会自动开机启动吗？** 首版不默认安装 Windows 服务，也不默认设置登录自启。
 
@@ -104,4 +104,4 @@ bin/         本机连接器（不提交）
 
 LanBridge is a Windows-first, self-hosted control panel for exposing LAN web services through Cloudflare Tunnel. It combines website mappings, connector management, Turnstile verification, access policies, temporary scoped management tokens, and CLI / HTTP API / MCP interfaces.
 
-The first release is source-based and requires Python 3.12+, a Cloudflare account and a domain. Source visibility does not grant an open-source license; see [COPYRIGHT.md](COPYRIGHT.md).
+The first release is source-based and requires Python 3.12+, a Cloudflare account and a domain. Licensed under the [MIT License](LICENSE). The Windows launcher lets you choose both local ports before starting the servers.
