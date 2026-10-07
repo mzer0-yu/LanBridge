@@ -1,3 +1,6 @@
+# Complete pinned environment, including transitive and test dependencies.
+# Used by install.ps1 and scripts/check_dependencies.py.
+# After a deliberate upgrade, verify the environment and regenerate this file.
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1

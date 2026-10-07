@@ -17,7 +17,7 @@ test('late Cloudflare onboarding does not reset inputs in a different session',a
   vm.runInContext(source.slice(start,source.indexOf("for(const kind of ['api-token','authority-token'])",start)),context);
   const pending=context.connectTokenAccess('api-token');context.csrf='new-session';finish({});await pending;
   assert.equal(nodes['#credentials-form [name=cf_write_token]'].value,'test-token');
-  assert.notEqual(nodes['#api-token-discovery-feedback'].textContent,'API Token、账户与域名已保存。');
+  assert.notEqual(nodes['#api-token-discovery-feedback'].textContent,'API Token、账户与域名已保存');
 });
 test('a stale log page cannot restore pruned records or older settings after refresh',async()=>{
   let finish;const nodes={'#audit-load-more':{},'#audit-storage-feedback':{}};

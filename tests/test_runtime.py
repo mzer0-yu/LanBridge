@@ -395,3 +395,51 @@ def test_gateway_conflict_keeps_admin_available_and_local_recovery_is_authentica
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
+
+
+@pytest.mark.parametrize('occupied_admin', [False, True])
+def test_windowless_startup_reports_ready_or_conflict(tmp_path, occupied_admin):
+    import json
+    project = Path(__file__).resolve().parents[1]
+    pythonw = Path(sys.executable).with_name('pythonw.exe')
+    if sys.platform != 'win32' or not pythonw.exists():
+        pytest.skip('Windows windowless launcher')
+    data = tmp_path / 'data with spaces'
+    service = Service(data)
+    admin_port, gateway_port = unused_port(), unused_port()
+    while admin_port == gateway_port:
+        gateway_port = unused_port()
+    service.store.set('settings', service.settings() | {'admin_port': admin_port, 'gateway_port': gateway_port})
+    service.store.db.close()
+    result_path = tmp_path / 'startup result.json'
+    occupied = socket.socket()
+    if occupied_admin:
+        occupied.bind(('127.0.0.1', admin_port))
+    process = subprocess.Popen([str(pythonw), str(project / 'run.py'), '--data-dir', str(data), 'serve', '--startup-result', str(result_path)], cwd=project, creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        deadline = time.monotonic() + 15
+        while not result_path.exists():
+            assert process.poll() is None, 'background process exited without a result'
+            if time.monotonic() > deadline:
+                raise AssertionError('background process did not report readiness')
+            time.sleep(0.05)
+        result = json.loads(result_path.read_text(encoding='utf-8'))
+        if occupied_admin:
+            assert not result['ok'] and str(admin_port) in result['error']
+            assert process.wait(timeout=10) == 1
+        else:
+            assert result['ok'] and result['port'] == admin_port
+            assert open_existing(data, open_browser=False)
+            url = f'http://127.0.0.1:{admin_port}'
+            with httpx.Client(base_url=url, headers={'Origin': url}, trust_env=False) as client:
+                account = {'username': 'admin', 'password': 'windowless test password'}
+                assert client.post('/api/setup', json=account).status_code == 200
+                login = client.post('/api/login', json=account).json()
+                client.headers['X-CSRF-Token'] = login['csrf']
+                assert client.post('/api/shutdown', json={}).status_code == 200
+            assert process.wait(timeout=15) == 0
+    finally:
+        occupied.close()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)

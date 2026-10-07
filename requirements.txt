@@ -1,3 +1,5 @@
+# Direct dependencies; maintain this list when adding or upgrading packages.
+# install.ps1 installs requirements.lock.txt for reproducible transitive versions.
 fastapi==0.142.2
 uvicorn==0.54.0
 httpx==0.28.1

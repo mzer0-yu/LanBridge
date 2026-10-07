@@ -5,12 +5,12 @@ const source=fs.readFileSync(path.join(__dirname,'../ui/client.js'),'utf8');
 function harness(fetch){
   const nodes={};
   const node=id=>nodes[id]||={disabled:false,hidden:true,textContent:'',children:[],replaceChildren(){this.children=[];},append(child){this.children.push(child);}};
-  const controllers=[];
+  const controllers=[];let tick;
   const context={document:{getElementById:node,createElement:()=>({})},fetch,Date,
     AbortSignal:{timeout(ms){const controller=new AbortController();controllers.push({ms,controller});return controller.signal;}},
-    setInterval(){}};
+    setInterval(callback){tick=callback;}};
   vm.createContext(context);vm.runInContext(source,context);
-  return {node,controllers};
+  return {node,controllers,document:context.document,tick:()=>tick()};
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 
@@ -37,4 +37,14 @@ test('failed route refresh keeps displayed routes and allows another attempt',as
   assert.equal(h.node('routes').children.length,1);
   assert(!h.node('refresh').disabled);
   assert(!h.node('error').hidden);
+});
+
+
+test('automatic route refresh skips hidden tabs but manual refresh remains available',async()=>{
+  let calls=0;
+  const h=harness(()=>{calls++;return Promise.resolve({ok:true,json:async()=>({routes:[],updated_at:1})});});
+  await settle();assert.equal(calls,1);
+  h.document.hidden=true;h.tick();await settle();assert.equal(calls,1);
+  await h.node('refresh').onclick();assert.equal(calls,2);
+  h.document.hidden=false;h.tick();await settle();assert.equal(calls,3);
 });

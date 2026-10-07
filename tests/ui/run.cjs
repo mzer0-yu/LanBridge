@@ -2,6 +2,7 @@ const {spawnSync} = require('node:child_process');
 const path = require('node:path');
 
 const checks = [
+  'autofill-check.js',
   'website-management-check.js',
   'login-method-check.js',
   'navigation-layout-check.js',
@@ -15,6 +16,7 @@ const checks = [
   'client-disabled-check.js',
   'content-layout-check.js',
   'gateway-recovery-check.js',
+  'admin-restart-check.js',
 ];
 for (const name of checks) {
   const result = spawnSync(process.execPath, [path.join(__dirname, name)], {stdio:'inherit'});

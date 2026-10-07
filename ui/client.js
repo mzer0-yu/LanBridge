@@ -20,4 +20,4 @@ async function refresh(){
     document.getElementById('updated').textContent='更新于 '+new Date(data.updated_at*1000).toLocaleTimeString('zh-CN');error.hidden=true;
   }catch(exception){error.textContent=exception.name==='TimeoutError'?'读取超时，请重新刷新。':exception.message;error.hidden=false;}finally{loading=false;button.disabled=false;}
 }
-button.onclick=refresh;refresh();setInterval(refresh,15000);
+button.onclick=refresh;refresh();setInterval(()=>{if(!document.hidden)refresh();},15000);

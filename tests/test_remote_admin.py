@@ -48,7 +48,7 @@ def test_remote_admin_and_client_authentication_and_csrf(service):
 def test_local_operations_never_open_through_remote_admin(service):
     remote_site(service)
     with remote_client(service) as client:
-        for path in ["/api/setup", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/approve", "/api/cloudflare/browser-authorize", "/api/cloudflare/browser-authorize-restart", "/api/shutdown", "/api/gateway-port", "/api/gateway-retry"]:
+        for path in ["/api/setup", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/approve", "/api/cloudflare/browser-authorize", "/api/cloudflare/browser-authorize-restart", "/api/shutdown", "/api/launcher/control", "/api/admin-port", "/api/connector-auto-start", "/api/restart", "/api/gateway-port", "/api/gateway-retry"]:
             assert client.post(path, json={}).status_code == 403
         assert client.get("/api/local-login/browsers").status_code == 403
         assert client.get("/api/state", headers={"Host": "127.0.0.1:8890"}).status_code == 404
@@ -165,3 +165,21 @@ def test_disabled_public_client_does_not_offer_entry_verification(service):
         assert "cf-turnstile" in client.get("/admin", headers={"Accept": "text/html"}).text
         client.cookies.set(PASS_COOKIE, signed_pass(service, site, "testclient"))
         assert client.get("/admin").status_code == 200
+
+
+def test_state_sites_and_probes_share_one_read(service, monkeypatch):
+    client = admin_client(service)
+    site = service.save_site(dict(name="Snapshot", hostname="snapshot.example.com", origin="http://127.0.0.1:9300", human_check=False))
+    service.store.set("probe_" + site["id"], {"ok": True})
+    original = service.sites
+    calls = []
+    def read_sites():
+        calls.append(True)
+        return original()
+    monkeypatch.setattr(service, "sites", read_sites)
+    response = client.get("/api/state")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(calls) == 1
+    assert data["site_probes"][site["id"]] == {"ok": True}
+    assert set(data["site_probes"]) == {site["id"] for site in data["sites"]}

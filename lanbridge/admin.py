@@ -20,7 +20,7 @@ from pydantic import ValidationError
 PUBLIC_CLIENT_PATHS = frozenset({"/client", "/client/", "/client.js", "/client.css", "/api/client/routes"})
 
 
-def create_admin(service, shutdown=None, *, remote=False):
+def create_admin(service, shutdown=None, *, remote=False, restart=None):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     from .browser_auth import BrowserAuth
     browser_auth = None if remote else BrowserAuth(service)
@@ -42,7 +42,7 @@ def create_admin(service, shutdown=None, *, remote=False):
                 return JSONResponse({"detail": "远程管理入口不可用"}, 403)
             if not service.store.get("admin"):
                 return JSONResponse({"detail": "请先在本机创建管理员"}, 503)
-            if request.url.path in {"/api/setup", "/api/shutdown", "/api/password", "/api/gateway-port", "/api/gateway-retry"} or request.url.path.startswith("/api/local-login/") or request.url.path.startswith("/api/cloudflare/browser-authorize"):
+            if request.url.path in {"/api/setup", "/api/shutdown", "/api/restart", "/api/password", "/api/admin-port", "/api/connector-auto-start", "/api/gateway-port", "/api/gateway-retry"} or request.url.path.startswith("/api/local-login/") or request.url.path.startswith("/api/cloudflare/browser-authorize"):
                 return JSONResponse({"detail": "此操作仅支持本机访问"}, 403)
             if not service.store.get("public_client_enabled", True) and request.url.path in PUBLIC_CLIENT_PATHS:
                 return disabled_client_response(request.url.path)
@@ -54,6 +54,18 @@ def create_admin(service, shutdown=None, *, remote=False):
             if request.client and request.client.host not in ("127.0.0.1", "::1", "testclient"):
                 return JSONResponse({"detail": "管理台仅监听本机"}, 403)
             expected_origin = "http://" + host
+        if request.url.path == "/api/launcher/control":
+            token = getattr(service, "launcher_control_token", "")
+            if remote or request.method != "POST" or request.headers.get("origin") is not None or not token or not secrets.compare_digest(request.headers.get("x-lanbridge-control", "").encode("utf-8"), token.encode("utf-8")) or request.headers.get("x-lanbridge-instance") != getattr(service, "runtime_id", None):
+                return JSONResponse({"detail": "启动器控制身份校验失败"}, 403)
+            if getattr(service, "restart_plan", None):
+                return JSONResponse({"detail": "平台正在重启"}, 409)
+            try:
+                response = await call_next(request)
+            except (ValueError, RuntimeError, OSError):
+                response = JSONResponse({"detail": "实例操作未完成，请检查实例状态和待生效端口"}, 400)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         authorization = request.headers.get("authorization", "")
         bearer = authorization.startswith("Bearer ")
         grant = service.store.temporary_token(authorization[7:]) if bearer else None
@@ -73,6 +85,8 @@ def create_admin(service, shutdown=None, *, remote=False):
         if not bearer and not public and request.method not in ("GET", "HEAD") and request.headers.get("x-csrf-token") != session["csrf"]:
             return JSONResponse({"detail": "CSRF 校验失败，请刷新管理台"}, 403)
         request.state.session = session
+        if getattr(service, "restart_plan", None) and request.method not in ("GET", "HEAD"):
+            return JSONResponse({"detail": "平台正在重启，请稍候"}, 409)
         if session and session.get("access_token_id") and request.url.path.startswith("/api/"):
             service.store.touch_temporary_token(session["access_token_id"])
         try:
@@ -313,6 +327,23 @@ def create_admin(service, shutdown=None, *, remote=False):
         service.store.audit("platform_shutdown_requested", {})
         return JSONResponse({"stopping": True}, background=BackgroundTask(shutdown))
 
+    @app.post("/api/restart")
+    def restart_platform():
+        if restart is None or shutdown is None:
+            raise ValueError("当前运行方式不支持网页重启，请通过启动器重新启动")
+        result = restart()
+        service.store.audit("platform_restart_requested", {"admin_port": result["port"]})
+        return JSONResponse(result, background=BackgroundTask(shutdown))
+
+    @app.post("/api/launcher/control")
+    async def launcher_control(request: Request):
+        operation = (await body(request)).get("operation")
+        if operation == "restart":
+            return await asyncio.to_thread(restart_platform)
+        if operation == "stop":
+            return await asyncio.to_thread(shutdown_platform)
+        raise ValueError("启动器操作无效")
+
     @app.post("/api/password")
     async def change_password(request: Request):
         data = await body(request)
@@ -340,26 +371,32 @@ def create_admin(service, shutdown=None, *, remote=False):
         managed_read = service.store.get("managed_read_token")
         if managed_read:
             managed_read = {k: v for k, v in managed_read.items() if k != "credential_digest"}
-        result = {"settings": service.settings(), "pending_gateway_port": service.store.get("pending_gateway_port"), "sites": service.sites(), "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+        sites_snapshot = service.sites()
+        result = {"settings": service.settings(), "pending_admin_port": service.store.get("pending_admin_port"), "restart_warning": service.store.get("restart_warning"), "pending_gateway_port": service.store.get("pending_gateway_port"), "sites": sites_snapshot, "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
                 "agent_skill_path": str((ui.parent / "skills" / "lanbridge" / "SKILL.md").resolve()) if not remote else None,
                 "tunnel_pending": bool(service.store.get("pending_tunnel_create")),
                 "published_hosts": service.store.get("published_hosts", []),
                 "publication_needs_review": bool(publication and publication[0] == "publish_incomplete"),
                 "publication_error": service.store.get("publication_error"),
-                "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in service.sites()},
+                "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in sites_snapshot},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": [] if limited else service.store.audit_list(), "audit_storage": {} if limited else service.store.audit_stats(),
                 "cloudflare_permission_issues": service.permission_issues(),
                 "browser_auth": browser_auth.status() if browser_auth else {"phase": "local_only", "message": "浏览器授权请在本机完成"},
                 "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token") or service.store.get("pending_browser_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
         result["public_client_enabled"] = service.store.get("public_client_enabled", True)
+        result["connector_auto_start"] = service.store.get("connector_auto_start", True)
+        result["connector_auto_start_supported"] = True
+        result["connector_startup_warning"] = None if result["connector"]["running"] else getattr(service, "connector_startup_warning", None)
+        result["admin_port_supported"] = True
+        result["restart_supported"] = bool(restart and shutdown) and not remote
         runtime = getattr(service, "gateway_runtime", None)
         result["gateway"] = runtime.status() if runtime else None
         result["access_scope"] = request.state.session.get("scope", "admin")
         result["access_permissions"] = request.state.session.get("permissions", [])
         result["access_expires"] = request.state.session.get("expires")
         if result["access_scope"] == "sites":
-            result.update(audit=[], audit_storage={}, agent_skill_path=None, pending_gateway_port=None)
+            result.update(audit=[], audit_storage={}, agent_skill_path=None, pending_gateway_port=None, pending_admin_port=None, restart_warning=None)
             if "account" not in result["access_permissions"]:
                 result.update(token_management={}, cloudflare_permission_issues=[], browser_auth={"phase": "local_only"})
                 result["settings"]["cloudflared_path"] = ""
@@ -369,6 +406,11 @@ def create_admin(service, shutdown=None, *, remote=False):
     async def public_client(request: Request):
         data = await body(request)
         return await asyncio.to_thread(service.set_public_client_enabled, data.get("enabled"))
+
+    @app.post("/api/connector-auto-start")
+    async def connector_auto_start(request: Request):
+        data = await body(request)
+        return await asyncio.to_thread(service.set_connector_auto_start, data.get("enabled"))
 
     @app.post("/api/gateway-port")
     async def gateway_port(request: Request):
@@ -383,6 +425,11 @@ def create_admin(service, shutdown=None, *, remote=False):
                 raise ValueError(status["error"])
             result.update(restart_required=False, recovered=True, gateway=status)
         return result
+
+    @app.post("/api/admin-port")
+    async def admin_port(request: Request):
+        data = await body(request)
+        return await asyncio.to_thread(service.queue_admin_port, data.get("port"))
 
     @app.post("/api/gateway-retry")
     async def gateway_retry(request: Request):

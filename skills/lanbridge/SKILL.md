@@ -7,7 +7,7 @@ description: Manage LanBridge local website mappings, Cloudflare Tunnel routes, 
 
 Locate the LanBridge checkout; the administrator UI is `/admin`, and the read-only local route directory is `/client`. Use its `.venv/Scripts/python.exe`. Inspect `run.py capabilities` to discover CLI commands. Read the project's README for API and MCP configuration.
 
-- When the platform is running, use its authenticated loopback API or LanBridge MCP tools. CLI writes require stopping the platform because it owns an exclusive runtime lock. `run.py status` remains available for local configuration inspection.
+- When the platform is running, use its authenticated loopback API or LanBridge MCP tools. Ordinary CLI configuration writes require stopping the platform because it owns an exclusive runtime lock. `run.py status` remains available for local configuration inspection; `instances`, `open-existing`, and `control` are lifecycle commands that work while the service is running.
 - Check `cloudflare_setup` before adding a site. Account ID, Zone ID, Zone name and a saved write credential (API token or browser OAuth) are required. Read `settings.zones` for all attached domains. Site hostnames must be subdomains of an attached Zone; pass its `zone_id` when creating a site, or let the service match the hostname. Existing sites retain their Zone binding. Missing credentials should lead to the local configuration page, rather than collecting a site form that cannot be saved.
 - Enter Cloudflare tokens and visitor passwords in the local management interface or the CLI hidden prompt. Do not put them in tool arguments, output, logs, command lines or repository files. MCP administrator credentials use the host's secure environment configuration.
 - `run.py ensure-connector` or MCP `lanbridge_prepare_connector` checks the configured executable, then PATH and project bin, then downloads the official Windows release when needed. The management page offers this action next to the executable path.
@@ -22,3 +22,17 @@ The project skill is distributable with the checkout. Install this folder in a s
 - For delegated website management, use a user-issued temporary access Token with `Authorization: Bearer <token>` at the reachable LanBridge `/api/` endpoint. Do not print credentials or put them in URLs. The Token defaults to 24 hours; its positive duration in hours is chosen by the issuing administrator and allows only site edits/pause/probe, route preview/apply, connection checks, and connector start/stop. By default it has only sites permission. An administrator may additionally select account permission to manage Cloudflare account credentials, domains and tunnel Tokens. Inspect access_permissions before operating. It never grants administrator password changes, listener port changes, executable path changes or temporary-Token issuance. Stop and request fresh authorization after expiry or revocation. Read README's temporary-access section for the exact endpoint list. Public Bearer access does not require visitor verification cookies but still enforces HTTPS, site pause, network policy and rate limits. Cookie-based login retains Origin and CSRF requirements.
 
 - Temporary management Token issuance/list/revocation is available to authenticated administrator password sessions through local or public management API/UI, with Origin and CSRF checks. All temporary Tokens are forbidden from these operations. Administrator password changes remain local-only, even for remote administrator password sessions.
+
+## Local startup and instance control
+
+Read the checkout's [Agent startup guide](../../docs/agent-startup.md) before managing its processes. `start.cmd` opens the GUI and does not accept CLI arguments; agents should call `run.py` with the project's virtual environment.
+
+```powershell
+.\.venv\Scripts\python.exe run.py instances
+.\.venv\Scripts\python.exe run.py serve --help
+.\.venv\Scripts\python.exe run.py control --help
+```
+
+`serve` runs in the foreground without opening a browser; add `--open-browser` only when requested. For background startup, use the guide's hidden `pythonw.exe` invocation and `--startup-result` readiness file. Do not treat process creation as readiness. Discover and match the exact data directory before reuse or control; inspect both the exit code and `instances.error`. Put global `--data-dir` before the subcommand.
+
+Only perform authorized lifecycle operations. Close or restart with `run.py --data-dir <absolute-data-directory> control stop|restart --instance <current-identity>`, then verify completion and reacquire the identity after restart. The control credential stays internal; never print `runtime.json` or put its secrets on command lines. Restart currently requests opening the management page. Running the same data directory twice is prevented by its runtime lock; remote temporary management Tokens do not grant local process control.

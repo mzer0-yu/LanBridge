@@ -9,7 +9,7 @@ async function main() {
   const artifacts = path.resolve(__dirname, '../../.test-artifacts/ui');
   fs.mkdirSync(artifacts, {recursive:true});
   try {
-    for (const width of [1440, 390]) {
+    for (const width of [1920, 1440, 760, 390, 320]) {
       const page = await browser.newPage({viewport:{width, height:1000}});
       const errors = [];
       page.on('pageerror', error=>errors.push(error.message));
@@ -47,6 +47,17 @@ async function main() {
       await page.locator('#manual-account-config>summary').click();
       await page.locator('#advanced-token-management>summary').click();
       await page.locator('#verification-advanced>summary').click();
+      // Measure the rendered gap, including margins collapsing through form wrappers.
+      const spacing = await page.evaluate(()=>[
+        ['.connector-software>details', '.advanced-body>label', 12],
+        ['#manual-account-config', '.manual-account-fields>div>label', 8],
+        ['#advanced-token-management', '.advanced-body>label', 8],
+        ['#verification-advanced', '.advanced-body>p', 20],
+      ].map(([selector,first,max])=>{
+        const detail=document.querySelector(selector), field=detail.querySelector(first);
+        return {selector,max,gap:field.getBoundingClientRect().top-detail.querySelector('summary').getBoundingClientRect().bottom};
+      }));
+      for (const {selector,max,gap} of spacing) assert(gap>=0&&gap<=max,`${selector}: leading gap ${gap}px at ${width}px`);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
       await page.screenshot({path:path.join(artifacts,`settings-expanded-${width}.png`),fullPage:true});
       const lines = await page.locator('#view-settings').evaluate(root=>Array.from(root.querySelectorAll('*')).filter(el=>{

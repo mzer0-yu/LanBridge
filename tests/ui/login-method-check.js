@@ -20,8 +20,8 @@ assert.equal(await page.locator('#temporary-login').evaluate(el=>getComputedStyl
 await page.screenshot({path:path.join(work,'login-method-admin-'+width+'.png')});
 await page.locator('#login-token-tab').click();assert.equal(await page.locator('#login-token-tab').getAttribute('aria-selected'),'true');await page.screenshot({path:path.join(work,'login-method-token-'+width+'.png')});
 assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-await page.locator('#temporary-login-form input').fill('invalid');await page.locator('#temporary-login-form button').click();await page.getByText('令牌无效或已到期',{exact:true}).waitFor();assert(await page.locator('#temporary-login').isVisible());assert.equal(await page.locator('#login-token-tab').getAttribute('aria-selected'),'true');assert.equal(await page.locator('#temporary-login-form input').inputValue(),'invalid');
-await page.locator('#temporary-login-form input').fill('lb_tmp_TEST_ONLY');await page.locator('#temporary-login-form button').click();await page.locator('#shell').waitFor();assert.equal(attempts,2);
+await page.locator('#temporary-login-form [name=token]').fill('invalid');await page.locator('#temporary-login-form button').click();await page.getByText('令牌无效或已到期',{exact:true}).waitFor();assert(await page.locator('#temporary-login').isVisible());assert.equal(await page.locator('#login-token-tab').getAttribute('aria-selected'),'true');assert.equal(await page.locator('#temporary-login-form [name=token]').inputValue(),'invalid');
+await page.locator('#temporary-login-form [name=token]').fill('lb_tmp_TEST_ONLY');await page.locator('#temporary-login-form [name=token]').press('Enter');await page.locator('#shell').waitFor();assert.equal(attempts,2);
 initialized=false;await page.reload();await page.locator('#auth-form').waitFor();assert(!await page.locator('#login-methods').isVisible());assert(!await page.locator('#temporary-login').isVisible());
 assert.deepEqual(errors,[]);await page.close();}
 console.log('PASS: desktop/mobile login switching, keyboard navigation, Token login, first-time setup, no overflow or JS errors');

@@ -45,7 +45,7 @@ LanBridge 转发的是网页和所选协议流量，不提供通用 VPN 或任�
 
    如果 `python` 不在 PATH，用 `-PythonPath "C:\Path\To\python.exe"` 指定 Python。
 
-3. 双击 **`start.cmd`**，在启动器中确认或修改管理台端口和转发网关端口，点击“启动并打开管理台”。管理台端口成功绑定后打开浏览器；网关冲突可进入管理台修改后重试，首次创建管理员账户，使用独立的长密码。
+3. 双击 **`start.cmd`**，在启动器中确认或修改管理台端口，按需勾选“启动后打开管理台”，点击启动。管理台端口成功绑定后按选项决定是否打开浏览器；网关冲突可进入管理台修改后重试，首次创建管理员账户，使用独立的长密码。
 4. 在“账户与配置”接入 Cloudflare。可使用浏览器授权，或提供所需权限的 API Token；凭据在本机保存。
 5. 到“网站转发”添加网站，例如 `demo.example.com` → `http://192.168.1.20:8080`，按需要设置访问保护，然后启动连接器并核查连接。
 6. 用外网浏览器访问自己的子域名，验证网页、应用登录和需要的 WebSocket 功能。
@@ -85,7 +85,9 @@ cloudflared 路径可以留空，平台可检测或从官方发布下载连接�
 ## 文档与开发
 
 - [使用指南与 API / CLI / MCP 说明](docs/user-guide.md)
+- [Agent 启动、后台就绪确认与实例控制](docs/agent-startup.md) · [Agent 操作 Skill](skills/lanbridge/SKILL.md)
 - [开发规则](AGENTS.md) · [当前验证状态](docs/review-status.md) · [浏览器检查](tests/ui/README.md)
+- [性能测量与本地打包](docs/performance-and-release.md)
 - [v1.0.0 发布说明](docs/releases/v1.0.0.md) · [安全说明](SECURITY.md)
 - [已修复问题](docs/fixed-issues.md) · [检查历史](docs/history.md)
 
@@ -104,4 +106,4 @@ bin/         本机连接器（不提交）
 
 LanBridge is a Windows-first, self-hosted control panel for exposing LAN web services through Cloudflare Tunnel. It combines website mappings, connector management, Turnstile verification, access policies, temporary scoped management tokens, and CLI / HTTP API / MCP interfaces.
 
-The first release is source-based and requires Python 3.12+, a Cloudflare account and a domain. Licensed under the [MIT License](LICENSE). The Windows launcher lets you choose both local ports before starting the servers.
+The first release is source-based and requires Python 3.12+, a Cloudflare account and a domain. Licensed under the [MIT License](LICENSE). The Windows launcher lets you choose the management port and whether to open the browser. Configure the forwarding gateway port inside the management UI. Agents can use the CLI for startup and instance control; see the [Agent startup guide](docs/agent-startup.md).

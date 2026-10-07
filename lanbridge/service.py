@@ -543,6 +543,40 @@ class Service:
             self.store.audit("public_client_changed", {"enabled": enabled})
         return {"enabled": enabled, "saved": True}
 
+    def set_connector_auto_start(self, enabled):
+        if type(enabled) is not bool:
+            raise ValueError("自动连接开关必须为布尔值")
+        with self.lock:
+            if getattr(self, "restart_plan", None):
+                raise ValueError("平台正在重启")
+            self.store.set("connector_auto_start", enabled)
+            self.store.audit("connector_auto_start_changed", {"enabled": enabled})
+        return {"enabled": enabled, "saved": True}
+
+    def start_connector_on_launch(self, resume=None):
+        """Attempt once; an explicit restart state overrides the normal launch preference."""
+        self.connector_startup_warning = None
+        wanted = self.store.get("connector_auto_start", True) if resume is None else resume
+        if not wanted:
+            return
+        runtime = getattr(self, "gateway_runtime", None)
+        cfg = self.settings()
+        try:
+            reason = None
+            if runtime and not runtime.status()["running"]:
+                reason = "转发网关未启动，请先在本机与安全中恢复网关。"
+            elif not cfg["tunnel_id"] or not self.store.secret("tunnel_token"):
+                reason = "隧道尚未配置完成，请先配置 Tunnel 和连接令牌。"
+            elif not self.connector.status().get("installed"):
+                reason = "尚未安装 Cloudflared，请先安装连接器。"
+            if reason:
+                self.connector_startup_warning = "自动连接未完成：" + reason
+                return
+            self.connector.start()
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
+            self.connector_startup_warning = "自动连接失败，请到网站转发检查并重新启动连接器。"
+
+
     def settings(self):
         return Settings(**self.store.get("settings", {})).model_dump()
 
@@ -562,10 +596,13 @@ class Service:
     def queue_gateway_port(self, port):
         import socket
         with self.lock:
+            if getattr(self, "restart_plan", None):
+                raise ValueError("平台正在重启，请稍后修改端口")
             cfg = self.settings()
             if isinstance(port, bool) or not isinstance(port, int):
                 raise ValueError("端口必须为 1024–65535 的整数")
             cfg = Settings(**(cfg | {"gateway_port": port})).model_dump()
+            Settings(**(cfg | {"admin_port": self.store.get("pending_admin_port") or cfg["admin_port"]}))
             for site in self.sites():
                 if site.get("target") != "lanbridge":
                     pinned_origin(site, cfg)
@@ -579,6 +616,33 @@ class Service:
             self.store.set("pending_gateway_port", pending)
             self.store.audit("gateway_port_scheduled", {"port": port})
             return {"saved": True, "pending_gateway_port": pending, "restart_required": bool(pending)}
+
+    def queue_admin_port(self, port):
+        import socket
+        import os
+        with self.lock:
+            if getattr(self, "restart_plan", None):
+                raise ValueError("平台正在重启，请稍后修改端口")
+            if isinstance(port, bool) or not isinstance(port, int):
+                raise ValueError("端口必须为 1024–65535 的整数")
+            current = self.settings()
+            candidate = Settings(**(current | {"admin_port": port})).model_dump()
+            Settings(**(candidate | {"gateway_port": self.store.get("pending_gateway_port") or current["gateway_port"]}))
+            for site in self.sites():
+                if site.get("target") != "lanbridge":
+                    pinned_origin(site, candidate)
+            pending = port if port != current["admin_port"] else None
+            if pending:
+                try:
+                    with socket.socket() as listener:
+                        if os.name == "nt":
+                            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                        listener.bind(("127.0.0.1", port))
+                except OSError:
+                    raise ValueError("该管理端口已被占用或被系统保留，请选择其他端口") from None
+            self.store.set("pending_admin_port", pending)
+            self.store.audit("admin_port_scheduled", {"port": port})
+            return {"saved": True, "pending_admin_port": pending, "restart_required": bool(pending)}
 
     def permission_issues(self):
         cfg = self.settings()

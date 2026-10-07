@@ -3,7 +3,7 @@
 @media(max-width:440px){header>div{gap:10px}header .local-tag{display:none}}
 .auth-client-entry{margin-left:auto}
 .auth-pending #auth{visibility:hidden}
-.auth-card input,.auth-card input:autofill,.auth-card input:-webkit-autofill{font:14px/1.6 'Segoe UI','Microsoft YaHei',system-ui,sans-serif!important;letter-spacing:0!important}
+.auth-card input,.auth-card textarea,.auth-card input:autofill,.auth-card input:-webkit-autofill{font:14px/1.6 'Segoe UI','Microsoft YaHei',system-ui,sans-serif!important;letter-spacing:0!important}
 /* Autofill preview belongs to the browser. Use one fixed visual mask while
    unfocused; editing retains the native password control and caret. */
 .login-password-field{position:relative;display:block;margin-top:7px}
@@ -81,6 +81,8 @@ nav button{transition:background-color .15s,color .15s;filter:none}nav button:ho
 
 /* Advanced setup is optional; keep the primary browser flow visible. */
 .advanced-options>summary{cursor:pointer;font-size:15px;font-weight:600;color:var(--ink);padding:8px 0}.advanced-body{padding-top:12px}
+/* The disclosure body owns its leading space; do not add the first field margin. */
+.advanced-body>label:first-child,.advanced-body>form>label:first-child{margin-top:0}
 #site-dialog{padding:0;overflow:hidden}#site-form{display:flex;flex-direction:column;max-height:90vh;max-height:90dvh}#site-form>.dialog-heading{padding:20px 24px;flex-shrink:0}#site-form>.dialog-footer{padding:16px 24px;margin:0;background:var(--panel);flex-shrink:0}.site-dialog-body{overflow-y:auto;padding:0 24px 18px;min-height:0;overscroll-behavior:contain}.site-dialog-body>.site-edit-section:first-child{border-top:0;margin-top:0}.panel-heading{flex-wrap:wrap}.verification-summary h2{flex-wrap:wrap}dl{grid-template-columns:100px minmax(0,1fr)}td{overflow-wrap:anywhere}.button-row>button{max-width:100%;white-space:normal}button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}footer{font-size:11px;letter-spacing:0}
 @media(max-width:760px){.auth-card .brand{margin-bottom:32px}.panel-heading>.muted{font-size:11px}#site-form>.dialog-heading{padding:16px}#site-form>.dialog-footer{padding:12px 16px}.site-dialog-body{padding:0 16px 16px}.dialog-footer button{white-space:normal}}
 
@@ -128,7 +130,7 @@ tr.site-paused td:first-child{box-shadow:inset 3px 0 #c69145}.badge.paused{backg
 #view-sites .cloud-connection-status{row-gap:0}
 #view-sites .cloud-connection-status>div{min-width:0}
 #view-sites .cloud-connection-status p{grid-column:1/-1;font-size:11px;margin:8px 0 0}
-#view-sites .connection-status-grid button.primary,#view-sites .connection-status-grid button.secondary{display:inline-flex;align-items:center;justify-content:center;height:36px;min-height:36px;padding:7px 12px;font-size:13px;line-height:20px}
+
 #view-sites .connection-details{padding-top:10px}
 #view-sites #tunnel-feedback,#view-sites #tunnel-permission-help{grid-column:1/-1}
 @media(max-width:1000px){#view-sites .connection-status-grid{grid-template-columns:1fr}#view-sites .cloud-connection-status{border-left:0;border-top:1px solid var(--line);padding:14px 0 0}}
@@ -146,7 +148,8 @@ tr.site-paused td:first-child{box-shadow:inset 3px 0 #c69145}.badge.paused{backg
 @media(max-width:760px){#view-overview .stats article{padding:12px 14px;gap:3px 10px}#view-overview .stats strong{font-size:23px}#view-overview .stats article:nth-child(3){border-left:0}#view-overview .stats article:nth-child(n+3){border-top:1px solid var(--line)}}
 
 /* Administrative controls use a compact desktop size and larger touch targets. */
-#shell button.primary,#shell button.secondary,dialog button.primary,dialog button.secondary{font-size:13px;line-height:1.4;min-height:34px;padding:7px 12px;border-radius:6px}
+:root{--control-height:36px;--control-padding-y:7px}
+#shell button.primary,#shell button.secondary,dialog button.primary,dialog button.secondary{display:inline-flex;align-items:center;justify-content:center;font-size:13px;line-height:20px;min-height:var(--control-height);padding:var(--control-padding-y) 12px;border-radius:6px}
 #shell .button-row,dialog .button-row{gap:8px;align-items:center}
 #shell .text-button{font-size:12px;line-height:1.5}
 #shell .icon-button{width:34px;height:34px;font-size:19px}
@@ -156,7 +159,7 @@ tr.site-paused td:first-child{box-shadow:inset 3px 0 #c69145}.badge.paused{backg
 #shell .interface-grid .panel{margin-bottom:0}
 #shell .settings-grid,#shell .interface-grid{gap:18px}
 #shell .connection-panel{padding:16px 20px}
-#shell .token-operation-group .button-row button{min-height:34px}
+
 #shell .local-connection-status,#shell .cloud-connection-status{column-gap:12px}
 #shell .cloud-connection-status>div{min-width:0}
 #shell header>div{gap:12px}
@@ -165,7 +168,7 @@ dialog .dialog-heading h2{font-size:20px}
 @media(max-width:760px){
   #shell .settings-grid,#shell .interface-grid{gap:16px}
   #shell .panel{padding:16px;margin-bottom:16px}
-  #shell button.primary,#shell button.secondary,dialog button.primary,dialog button.secondary{min-height:40px;padding:9px 12px;font-size:13px}
+  :root{--control-height:40px;--control-padding-y:9px}
   #shell .row-action{min-height:40px;padding:8px 10px}
   #shell .icon-button{width:40px;height:40px}
   #shell .page-switch{min-height:40px;padding:8px 12px}
@@ -211,6 +214,7 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .connector-software-version{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px}
 .connector-software-version>p{margin:0;min-width:0;overflow-wrap:anywhere}
 .connector-software-version .button-row{margin:0;flex-shrink:0}
+.connector-software-version .button-row button{min-width:84px}
 .connector-software>.advanced-options{margin-top:14px}
 .connector-software>.advanced-options>summary{font-size:12px;font-weight:400;color:var(--muted);padding:4px 0}
 .connector-software>.form-feedback:empty{display:none}
@@ -249,7 +253,7 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 
 .browser-auth-choice{display:block;font-size:12px;color:var(--muted);max-width:280px;margin:0 0 12px}.browser-auth-choice select{display:block;width:100%;font:inherit;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:9px 12px;margin-top:5px;background:white}
 
-.websites-panel>.panel-heading{align-items:center;gap:12px;flex-wrap:wrap}.websites-panel>.panel-heading #preview{font-size:12px;padding:7px 12px}.websites-panel #plan-content{margin-top:16px;padding-top:16px}
+.websites-panel>.panel-heading{align-items:center;gap:12px;flex-wrap:wrap}.websites-panel #plan-content{margin-top:16px;padding-top:16px}
 
 .account-domain-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:12px 0}
 .account-domain-heading p{margin:0}
@@ -281,7 +285,7 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 #account-manual-path .manual-access-content{border:0;margin:0;padding:0}
 #account-manual-path #manual-credentials>p:first-child{margin:0 0 16px}
 .token-input-row{display:flex;align-items:center;gap:10px;margin-top:7px}
-.token-input-row input{flex:1;min-width:0;margin:0}
+.token-input-row :is(input,textarea){flex:1;min-width:0;margin:0}
 .token-input-row button{flex-shrink:0;white-space:nowrap}
 .token-input-label #write-token-status{font-size:11px;font-weight:400;margin-left:8px;color:var(--muted)}
 #account-manual-path .token-help{margin:14px 0 0;padding:0;border:0}
@@ -334,11 +338,12 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 #manual-account-config .field-guide{margin:6px 0 14px;padding:0;font-size:11px}
 #manual-account-config .field-guide>summary{font-size:11px;font-weight:400}
 #manual-account-config label{font-size:12px;margin-bottom:8px}
+#manual-account-config .manual-account-fields>div>label:first-child{margin-top:0}
 #manual-account-config .manual-account-actions{gap:10px;margin-top:16px}
 #manual-account-config input{margin-top:5px}
 
 /* Final alignment and interaction polish for account access. */
-.token-input-row input,.token-input-row button{min-height:40px;height:40px}
+.token-input-row :is(input,textarea),.token-input-row button{min-height:40px;height:40px}
 #account-manual-path #manual-account-config>summary,
 #account-manual-path #advanced-token-management>summary{padding:11px 14px}
 #account-manual-path .disclosure-purpose{display:inline;margin:0 0 0 12px;white-space:normal}
@@ -388,7 +393,7 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 #account-config-details>.advanced-body>.account-access-switch{margin-bottom:12px}
 #account-config-details .browser-auth-description{margin:0 0 12px;line-height:1.65}
 #account-config-details .browser-auth-choice select{height:36px;padding:6px 10px;font-size:12px}
-#account-config-details .browser-auth-actions button,#tunnel-maintenance #tunnel-token-refresh{min-height:36px;padding:6px 12px;font-size:12px}
+
 .account-tunnel-credentials>div{margin:0;padding:8px 12px 12px;background:transparent}
 .account-tunnel-credentials p{margin:0 0 10px}
 .account-tunnel-credentials .form-feedback{margin:10px 0 0}
@@ -418,9 +423,10 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .verification-advanced>summary{cursor:pointer;font-size:12px;color:var(--muted);padding:4px 0}
 .verification-advanced>.advanced-body{margin-top:8px;padding:12px;background:#f6f8f7;border-radius:7px}
 .verification-advanced h3{font-size:14px}
-.verification-advanced .advanced-body>p{margin:6px 0 12px}
+.verification-advanced .advanced-body>p{margin:0 0 12px}
 .local-security-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
-.local-security-heading .text-button{padding:0;font-size:12px}
+.local-security-editor-actions{display:flex;justify-content:flex-end;margin-top:12px}
+.local-security-editor-actions .text-button{padding:0;font-size:12px}
 .local-security-switch{display:flex;gap:8px;flex-wrap:wrap}
 #shell .local-security-switch button{border:1px solid transparent;border-radius:7px;background:#f3f6f4;color:var(--ink);padding:9px 12px;font-size:13px;font-weight:600;text-align:left}
 #shell .local-security-switch button:disabled{opacity:1;color:#7a827c;background:#dfe4e0;border-color:#d1d8d2;cursor:not-allowed;filter:none}
@@ -436,8 +442,9 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 #shell .local-security-panel #password-details{margin:0;padding:0;border:0}
 .local-password-note{margin:8px 0 0}
 .gateway-port-controls{display:flex;align-items:center;gap:10px}
-#gateway-port-form .gateway-port-controls input{width:140px;margin:0;height:36px;padding:6px 10px}
-#shell .gateway-port-controls button{height:36px;padding:6px 12px}
+.local-security-panel .gateway-port-controls input{width:140px;margin:0;height:36px;padding:6px 10px}
+#shell .gateway-port-controls button{height:var(--control-height)}
+@media(max-width:760px){.local-security-panel .gateway-port-controls input,#shell .gateway-port-controls button{height:40px}}
 #gateway-port-note{margin:8px 0 0;line-height:1.6}
 .local-security-panel .form-feedback:empty{display:none}
 .local-security-panel .form-feedback{margin:8px 0 0}
@@ -562,7 +569,8 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .audit-storage-form{display:flex;align-items:flex-end;flex-wrap:wrap;gap:10px 14px;margin-bottom:14px}.audit-storage-form label{margin:0}.audit-storage-form input{width:150px}.audit-storage-form>span{padding-bottom:7px}#audit-load-more{margin-top:14px}
 
 /* Log retention controls share the same height and vertical baseline. */
-#audit-storage-form input,#shell #audit-storage-form button{height:36px;min-height:36px;padding:7px 10px;line-height:20px;font-size:13px;border-radius:6px}
+#audit-storage-form input{height:var(--control-height);padding:var(--control-padding-y) 12px;line-height:20px;font-size:13px;border-radius:6px}
+#shell #audit-storage-form button{height:var(--control-height)}
 #audit-storage-form>span{display:flex;align-items:center;min-height:36px;padding-bottom:0}
 @media(max-width:600px){#audit-storage-form>span{flex-basis:100%;min-height:0}}
 
@@ -687,3 +695,18 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .public-client-controls button.save-success{background:var(--light);color:var(--green);border-color:#b6d0c3}
 .public-access-panel .public-client-note{margin:12px 0 0}
 @media(prefers-reduced-motion:reduce){.public-client-controls button{transition:none}}
+
+.local-security-heading>.button-row{margin:0;flex-wrap:wrap;justify-content:flex-end}
+
+#platform-restarting{min-height:100vh;display:grid;place-items:center;padding:24px}
+#platform-restarting[hidden]{display:none}
+
+.connector-auto-start-form{margin-top:14px}
+.connector-auto-start-note{margin:10px 0 0}
+
+/* A masked text area keeps service keys separate from browser login passwords. */
+.secret-input{display:block;width:100%;height:42px;padding:10px 12px;background:#fcfdfc;border:1px solid #dbe3dc;border-radius:6px;margin-top:7px;color:var(--ink);outline:none;font:inherit;line-height:20px;resize:none;overflow:hidden;-webkit-text-security:disc}
+.secret-input:focus{border-color:#70a48a;box-shadow:0 0 0 3px #edf4ef}
+.secret-input::placeholder{color:#b1bcb4;-webkit-text-security:none}
+
+.token-input-row .secret-input{padding:9px 12px;line-height:20px}

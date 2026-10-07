@@ -15,9 +15,9 @@ for(const width of [1440,390]){
  const input=page.locator('#public-client-form input'),save=page.locator('#public-client-form button');
  assert(await input.isChecked());assert(await page.locator('main a[href="/client"]').isVisible());
  const spacing=await page.locator('.public-client-note').evaluate(el=>({bottom:getComputedStyle(el).marginBottom,padding:getComputedStyle(el.closest('.panel')).paddingBottom}));assert.equal(spacing.bottom,'0px');
- const before=await page.locator('.public-access-panel').boundingBox();
+ const before=await page.locator('.public-access-panel').boundingBox(),buttonBefore=await save.boundingBox();
  await input.uncheck();await save.click();await page.getByRole('button',{name:'已保存',exact:true}).waitFor();
- const after=await page.locator('.public-access-panel').boundingBox();assert.equal(after.height,before.height);
+ const after=await page.locator('.public-access-panel').boundingBox();assert.equal(after.height,before.height);const buttonAfter=await save.boundingBox();assert.equal(buttonAfter.width,buttonBefore.width);assert.equal(buttonAfter.height,buttonBefore.height);
  await page.emulateMedia({reducedMotion:'reduce'});assert.equal(await save.evaluate(el=>getComputedStyle(el).transitionDuration),'0s');await page.emulateMedia({reducedMotion:'no-preference'});assert.equal(await page.locator('#public-client-feedback').textContent(),'');
  await page.locator('.public-access-panel').screenshot({path:path.join(work,'public-client-saved-'+width+'.png')});
  assert.equal(writes,1);assert(!await page.locator('main a[href="/client"]').isVisible());assert(!(await input.isChecked()));

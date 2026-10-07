@@ -77,7 +77,7 @@ window.localLoginUI=(()=>{
     try{
       const details=await api('local-login/request/'+requestId);
       if(expected!==generation||requestId!==approvalId)return;
-      if(details.phase!=='pending')throw Error('此登录请求已经处理。');
+      if(details.phase!=='pending')throw Error('此登录请求已经处理');
       for(const id of ['local-approval-allow','local-approval-deny'])node(id).disabled=false;
       approvalCode=details.code;node('local-approval-code').textContent=details.code;
       node('local-approval-status').textContent='请在 '+new Date(details.expires_at*1000).toLocaleTimeString('zh-CN')+' 前确认。';
