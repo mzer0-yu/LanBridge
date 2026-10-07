@@ -29,6 +29,17 @@ def test_credentials_validation_is_atomic(service):
     assert service.store.secret("cf_write_token") == original
 
 
+def test_site_passcode_rejects_non_string_values_without_mutation(service):
+    client=admin_client(service)
+    previous=service.sites()
+    for value in (False,123,[],{},None):
+        response=client.post('/api/sites',json={'name':'invalid','hostname':'invalid.example.com',
+                            'origin':'http://127.0.0.1:9300','human_check':False,'passcode':value})
+        assert response.status_code==400
+        assert response.json()['detail']=='网站访问口令格式无效'
+        assert service.sites()==previous
+
+
 def test_optional_read_token_can_be_removed_without_changing_business_token(service):
     client = admin_client(service)
     service.store.set_secret("cf_read_token", "optional-read-token")
@@ -312,3 +323,75 @@ def test_rate_limit_applies_even_with_visitor_cookie(service):
     for _ in range(10):
         assert client.get("/api/private").status_code == 401
     assert client.get("/api/private").status_code == 429
+
+
+def test_password_change_rejects_in_flight_old_password_login(service, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import lanbridge.admin as admin
+    owner = admin_client(service)
+    outsider = TestClient(create_admin(service), base_url="http://127.0.0.1:8890", headers={"Origin":"http://127.0.0.1:8890"})
+    checked, release = threading.Event(), threading.Event()
+    original = admin.password_check
+    def delayed(value, encoded):
+        valid = original(value, encoded)
+        if not checked.is_set():
+            checked.set()
+            assert release.wait(5)
+        return valid
+    monkeypatch.setattr(admin, "password_check", delayed)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(outsider.post, "/api/login", json={"username":"admin","password":"correct horse battery"})
+        try:
+            assert checked.wait(5)
+            response = owner.post("/api/password", json={"current":"correct horse battery","password":"new administrator password"})
+            assert response.status_code == 200
+        finally:
+            release.set()
+        response = future.result(timeout=5)
+    assert response.status_code == 401
+    assert "set-cookie" not in response.headers
+    assert service.store.db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    assert outsider.post("/api/login", json={"username":"admin","password":"new administrator password"}).status_code == 200
+
+
+def test_lan_origin_rechecks_dns_after_private_address_changes(monkeypatch):
+    import socket
+    answers = iter([
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.10", 0))],
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))],
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.10", 0)),
+         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]])
+    monkeypatch.setattr(socket,"getaddrinfo",lambda *args,**kwargs:next(answers))
+    assert lan_address("changing-origin.local") == "192.168.1.10"
+    with pytest.raises(ValueError,match="不支持公网"):
+        lan_address("changing-origin.local")
+    with pytest.raises(ValueError,match="不支持公网"):
+        lan_address("changing-origin.local")
+
+
+@pytest.mark.parametrize("payload", [None, [], True, "private-upstream-message"])
+def test_malformed_turnstile_result_fails_safely_without_grant(service, monkeypatch, payload):
+    add_site(service)
+    service.store.set_secret("turnstile_secret", "private-turnstile-secret")
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return payload
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+    monkeypatch.setattr("lanbridge.gateway.httpx.AsyncClient", FakeClient)
+    with TestClient(create_gateway(service), base_url="https://app.example.com") as client:
+        response = client.post("/.lanbridge/verify", json={"token": "test-token"},
+                               headers={"Origin": "https://app.example.com"})
+    assert response.status_code == 503
+    assert "set-cookie" not in response.headers
+    assert "private-upstream-message" not in response.text
+    assert "private-turnstile-secret" not in response.text

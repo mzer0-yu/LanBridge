@@ -225,5 +225,90 @@ def test_website_api_automatically_prepares_verification_and_disabling_is_local(
     disabled = response.json()
     response = client.post('/api/sites', json=disabled | {"human_check": True, "origin": "http://127.0.0.1:9302"})
     assert response.status_code == 400 and '未保存' in response.json()['detail']
-    assert next(s for s in service.sites() if s['id'] == first['id']) == disabled
+    assert disabled['publication']['status'] == 'failed'
+    assert next(s for s in service.sites() if s['id'] == first['id']) == {k: v for k, v in disabled.items() if k != 'publication'}
     assert sum(method == 'POST' for method, _ in calls) == 1
+
+def test_site_save_auto_publishes_and_policy_edits_do_not_write_cloud(service, monkeypatch):
+    remote, records, calls, site = prepare(service, monkeypatch)
+    result = service.save_site(site, auto_publish=True)
+    assert result['publication']['status'] == 'published'
+    assert service.store.get('published_hosts') == [site['hostname']]
+    assert any(method == 'PUT' for method, _, _ in calls)
+    assert remote['config']['ingress'][0]['hostname'] == 'other.example.com'
+    calls.clear()
+    result = service.save_site(site | {'origin': 'http://127.0.0.1:9302'}, auto_publish=True)
+    assert result['publication']['status'] == 'unchanged'
+    assert calls == []
+    result = service.save_site(site | {'enabled': False}, auto_publish=True)
+    assert result['publication']['status'] == 'published'
+    assert not any(r.get('hostname') == site['hostname'] for r in remote['config']['ingress'])
+    assert records  # Disabling leaves the DNS record intact.
+    result = service.save_site(site, auto_publish=True)
+    assert result['publication']['status'] == 'published'
+    assert service.store.get('published_hosts') == [site['hostname']]
+
+
+def test_auto_publish_failure_keeps_saved_site_and_retry_clears_error(service, monkeypatch):
+    remote, records, calls, site = prepare(service, monkeypatch)
+    original = service.cf.plan
+    def conflict():
+        raise ValueError('DNS conflict')
+    monkeypatch.setattr(service.cf, 'plan', conflict)
+    result = service.save_site(site, auto_publish=True)
+    assert result['publication'] == {'status': 'failed', 'message': 'DNS conflict'}
+    assert service.sites()[0]['hostname'] == site['hostname']
+    assert service.store.get('publication_error') == 'DNS conflict'
+    assert not calls
+    monkeypatch.setattr(service.cf, 'plan', original)
+    result = service.save_site(site, auto_publish=True)
+    assert result['publication']['status'] == 'published'
+    assert service.store.get('publication_error') is None
+
+
+@pytest.mark.parametrize("sitekey", [None, "", True, 123, {"unexpected": "value"}, ["bad"], " "])
+def test_invalid_widget_identity_preserves_settings_and_recovers_without_duplicate(service, monkeypatch, sitekey):
+    service.save_site({"name": "human", "hostname": "app.example.com", "origin": "http://127.0.0.1:9300", "human_check": True})
+    previous = service.settings()
+    calls, created = [], []
+    def request(method, path, body=None):
+        calls.append(method)
+        if "/zones/" in path:
+            return {"name": "example.com", "status": "active", "account": {"id": "a" * 32}}
+        if method == "POST":
+            widget = body | {"sitekey": "valid-recovered-widget", "secret": "isolated-widget-secret"}
+            created.append(widget)
+            return widget | {"sitekey": sitekey}
+        if "?" in path:
+            return created
+        return created[0]
+    monkeypatch.setattr(service.cf, "request", request)
+    with pytest.raises(RuntimeError, match="Widget"):
+        service.cf.create_widget()
+    assert service.settings() == previous
+    assert not service.store.secret("turnstile_secret")
+    assert not service.store.get("owned_widget")
+    assert service.store.get("pending_widget_create")
+    assert "sitekey" not in service.store.get("pending_widget_create")
+    assert service.cf.create_widget()["saved"]
+    assert calls.count("POST") == 1
+    assert service.settings()["turnstile_sitekey"] == "valid-recovered-widget"
+
+
+def test_invalid_recovered_widget_identity_does_not_create_or_change_settings(service, monkeypatch):
+    service.save_site({"name": "human", "hostname": "app.example.com", "origin": "http://127.0.0.1:9300", "human_check": True})
+    previous = service.settings()
+    pending = {"name": "LanBridge-recovery", "account_id": previous["account_id"]}
+    service.store.set("pending_widget_create", pending)
+    def request(method, path, body=None):
+        assert method == "GET"
+        if "/zones/" in path:
+            return {"name": "example.com", "status": "active", "account": {"id": "a" * 32}}
+        assert "?" in path
+        return [{"name": pending["name"], "sitekey": True}]
+    monkeypatch.setattr(service.cf, "request", request)
+    with pytest.raises(RuntimeError, match="Widget"):
+        service.cf.create_widget()
+    assert service.settings() == previous
+    assert service.store.get("pending_widget_create") == pending
+    assert not service.store.secret("turnstile_secret")

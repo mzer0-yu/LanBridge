@@ -10,7 +10,9 @@ class Site(BaseModel):
     id: str = ""
     name: str = Field(min_length=1, max_length=80)
     hostname: str
+    zone_id: str = ""
     origin: str
+    target: Literal["website", "lanbridge"] = "website"
     enabled: bool = True
     paused: bool = False
     protocols: list[Literal["http", "websocket"]] = Field(default_factory=lambda: ["http", "websocket"], min_length=1)
@@ -28,6 +30,14 @@ class Site(BaseModel):
         v = v.strip().lower().rstrip(".")
         if len(v) > 253 or not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", v):
             raise ValueError("请输入完整公网域名，例如 app.example.com")
+        return v
+
+    @field_validator("zone_id")
+    @classmethod
+    def zone_identity(cls, v):
+        v = v.strip().lower()
+        if v and not re.fullmatch("[a-f0-9]{32}", v):
+            raise ValueError("Zone ID 必须为 32 位十六进制")
         return v
 
     @field_validator("origin")
@@ -58,10 +68,29 @@ class Site(BaseModel):
         return [str(ipaddress.ip_network(v.strip(), strict=False)) for v in values if v.strip()]
 
 
+class Zone(BaseModel):
+    zone_id: str
+    zone_name: str
+
+    @field_validator("zone_id")
+    @classmethod
+    def identity(cls, v):
+        value = Site.zone_identity(v)
+        if not value:
+            raise ValueError("域名必须填写 Zone ID")
+        return value
+
+    @field_validator("zone_name")
+    @classmethod
+    def name(cls, v):
+        return Site.host(v)
+
+
 class Settings(BaseModel):
     account_id: str = ""
     zone_id: str = ""
     zone_name: str = ""
+    zones: list[Zone] = Field(default_factory=list, max_length=100)
     tunnel_id: str = ""
     tunnel_name: str = "LanBridge"
     cloudflared_path: str = ""
@@ -94,4 +123,14 @@ class Settings(BaseModel):
     def ports(self):
         if self.admin_port == self.gateway_port:
             raise ValueError("管理台与网关端口必须不同")
+        if self.zone_id and self.zone_name:
+            primary = Zone(zone_id=self.zone_id, zone_name=self.zone_name)
+            if not any(z.zone_id == primary.zone_id for z in self.zones):
+                self.zones.insert(0, primary)
+            elif any(z.zone_id == primary.zone_id and z.zone_name != primary.zone_name for z in self.zones):
+                raise ValueError("默认域名与域名列表不一致")
+        if len(self.zones) > 100:
+            raise ValueError("最多接入 100 个域名（含默认域名）")
+        if len({z.zone_id for z in self.zones}) != len(self.zones) or len({z.zone_name for z in self.zones}) != len(self.zones):
+            raise ValueError("域名或 Zone ID 不能重复")
         return self

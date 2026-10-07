@@ -14,11 +14,12 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
+from pathlib import Path
 
 import httpx
 import anyio
 from fastapi import FastAPI, Request, WebSocket
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 import websockets
 
 from .service import pinned_origin
@@ -26,6 +27,14 @@ from .store import password_check
 from .upstream import UpstreamPools
 from .gateway_log import transfer_logger
 from contextlib import asynccontextmanager
+
+def disabled_client_response(path):
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY"}
+    if path in {"/client", "/client/"}:
+        headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+        return FileResponse(Path(__file__).resolve().parent.parent / "ui" / "client-disabled.html", status_code=404, media_type="text/html", headers=headers)
+    return JSONResponse({"detail": "公网转发列表未启用"}, status_code=404, headers=headers)
+
 
 PASS_COOKIE = "__Host-lanbridge-pass"
 PREFIX = "/.lanbridge"
@@ -199,10 +208,20 @@ class TokenBudget:
         return True
 
 
+def bounded_length(value, maximum):
+    # Bound decimal conversion as well as the body; leading zeros are harmless.
+    if not value.isascii() or not value.isdecimal():
+        raise OverflowError()
+    normalized = value.lstrip("0") or "0"
+    if len(normalized) > len(str(maximum)) or int(normalized) > maximum:
+        raise OverflowError()
+    return int(normalized)
+
+
 async def bounded_body(request, maximum=4096, seconds=10):
     length = request.headers.get("content-length")
-    if length is not None and (not length.isdigit() or int(length) > maximum):
-        raise OverflowError()
+    if length is not None:
+        bounded_length(length, maximum)
     body = bytearray()
     with anyio.fail_after(seconds):
         async for chunk in request.stream():
@@ -278,9 +297,11 @@ def denied_policy(site, ip, country):
 
 
 def filtered_headers(headers):
-    connection = {h.strip().lower() for h in headers.get("connection", "").split(",")}
-    items = headers.multi_items() if hasattr(headers, "multi_items") else headers.items()
-    return [(k, v) for k, v in items if k.lower() not in HOP | connection]
+    items = list(headers.multi_items() if hasattr(headers, "multi_items") else headers.items())
+    connection = {h.strip().lower() for k, v in items if k.lower() == "connection"
+                  for h in v.split(",") if h.strip()}
+    excluded = HOP | connection
+    return [(k, v) for k, v in items if k.lower() not in excluded]
 
 
 def gate_page(service, site):
@@ -304,11 +325,11 @@ async function submitVerification(){
   if(submitting||!form.reportValidity())return;
   submitting=true;button.disabled=true;error.textContent='';message.textContent='正在确认验证结果…';
   try{
-    const r=await fetch('/.lanbridge/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:humanToken||document.querySelector('[name="cf-turnstile-response"]')?.value||'',passcode:document.querySelector('#passcode')?.value||''})});
+    const r=await fetch('/.lanbridge/verify',{method:'POST',signal:AbortSignal.timeout(30000),headers:{'Content-Type':'application/json'},body:JSON.stringify({token:humanToken||document.querySelector('[name="cf-turnstile-response"]')?.value||'',passcode:document.querySelector('#passcode')?.value||''})});
     if(!r.ok){const d=await r.json();throw Error(d.detail||'验证失败')}
     message.textContent='验证通过，正在进入网站…';location.reload();
   }catch(err){
-    error.textContent=err.message;message.textContent='';humanToken='';
+    error.textContent=err.name==='TimeoutError'?'验证请求超时，请重试。':err.message;message.textContent='';humanToken='';
     button.hidden=false;
     if(window.turnstile)window.turnstile.reset();
   }finally{submitting=false;button.disabled=false}
@@ -321,7 +342,20 @@ form.onsubmit=e=>{e.preventDefault();submitVerification()};
     return HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
 
 
+class RemoteAdminResponse(Response):
+    """Dispatch only an explicitly configured LanBridge target, without a proxy loop."""
+    def __init__(self, app, ip):
+        super().__init__(content=b"")
+        self.remote_app, self.ip = app, ip
+
+    async def __call__(self, scope, receive, send):
+        remote_scope = dict(scope, scheme="https", client=(self.ip, 0), state=dict(scope.get("state", {})))
+        await self.remote_app(remote_scope, receive, send)
+
+
 def create_gateway(service):
+    from .admin import create_admin, PUBLIC_CLIENT_PATHS
+    remote_admin = create_admin(service, remote=True)
     pools = UpstreamPools()
     logger, log_handler = transfer_logger(service.store.root)
     @asynccontextmanager
@@ -354,7 +388,20 @@ def create_gateway(service):
         if request.url.path.startswith(PREFIX):
             return Response("Not found", 404)
         protected = site["human_check"] or site["passcode_required"]
-        if protected and not valid_pass(service, site, ip, request.cookies.get(PASS_COOKIE, "")):
+        temporary_access = False
+        if site.get("target") == "lanbridge":
+            if request.url.path in PUBLIC_CLIENT_PATHS and not service.store.get("public_client_enabled", True):
+                return disabled_client_response(request.url.path)
+            from .temporary_access import allowed
+            authorization = request.headers.get("authorization", "")
+            if authorization.startswith("Bearer "):
+                grant = service.store.temporary_token(authorization[7:])
+                temporary_access = bool(grant and allowed(request.method, request.url.path, grant["permissions"]))
+            # A token-authenticated browser still uses the normal same-origin/CSRF guard.
+            session = service.store.session(request.cookies.get("lb_admin", ""))
+            if session and session.get("scope") == "sites":
+                temporary_access = allowed(request.method, request.url.path, session["permissions"]) or request.url.path in {"/admin", "/admin/", "/app.js", "/style.css", "/local-login.js", "/favicon.svg"}
+        if protected and not temporary_access and not valid_pass(service, site, ip, request.cookies.get(PASS_COOKIE, "")):
             if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
                 return gate_page(service, site)
             return JSONResponse({"detail": "需要先在浏览器中完成访问验证", "verification_required": True}, 401, headers={"Cache-Control": "no-store"})
@@ -378,7 +425,7 @@ def create_gateway(service):
             return Response(status_code=413)
         except TimeoutError:
             return Response(status_code=408)
-        except ValueError:
+        except (ValueError, RecursionError):
             return JSONResponse({"detail": "验证请求无效"}, 400)
         if site["passcode_required"] and not await anyio.to_thread.run_sync(password_check, str(body.get("passcode", "")), service.store.secret("passcode_" + site["id"])):
             return JSONResponse({"detail": "口令不正确"}, 403)
@@ -391,9 +438,11 @@ def create_gateway(service):
                 async with httpx.AsyncClient(timeout=12, trust_env=False) as client:
                     result = await client.post("https://challenges.cloudflare.com/turnstile/v0/siteverify", data={"secret": secret, "response": token, "remoteip": ip})
                 data = result.json()
+                if not isinstance(data, dict):
+                    raise ValueError("invalid_verification_response")
                 if result.status_code != 200 or data.get("success") is not True or data.get("hostname") != site["hostname"] or data.get("action") != "lanbridge":
                     return JSONResponse({"detail": "人类验证未通过，请重试"}, 403)
-            except (httpx.HTTPError, ValueError):
+            except (httpx.HTTPError, ValueError, RecursionError):
                 return JSONResponse({"detail": "人类验证服务暂不可用"}, 503)
         response = JSONResponse({"verified": True}, headers={"Cache-Control": "no-store"})
         response.set_cookie(PASS_COOKIE, signed_pass(service, site, ip), max_age=site["session_minutes"] * 60, httponly=True, secure=True, samesite="lax", path="/")
@@ -402,13 +451,16 @@ def create_gateway(service):
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
     async def proxy(request: Request, path: str):
         site = request.state.site
+        if site.get("target") == "lanbridge":
+            return RemoteAdminResponse(remote_admin, request.state.ip)
+        try:
+            length = bounded_length(request.headers.get("content-length", "0"), 32 * 1024 * 1024)
+        except OverflowError:
+            return Response("请求内容过大", 413)
         try:
             base, host, sni = await anyio.to_thread.run_sync(pinned_origin, site, service.settings())
         except ValueError:
             return Response("源站配置不可用", 502)
-        length = request.headers.get("content-length", "0")
-        if not length.isdigit() or int(length) > 32 * 1024 * 1024:
-            return Response("请求内容过大", 413)
         raw_path = request.scope.get("raw_path", request.url.path.encode()).decode("ascii")
         query = request.scope.get("query_string", b"").decode("ascii")
         target = base + raw_path + ("?" + query if query else "")
@@ -419,7 +471,7 @@ def create_gateway(service):
             headers.append(("cookie", cookies))
         # Keep known body lengths; do not manufacture chunked uploads for bodyless requests.
         if "content-length" in request.headers:
-            headers.append(("content-length", length))
+            headers.append(("content-length", str(length)))
         try:
             connection_auth = request.headers.get("authorization", "").strip().lower().startswith(("ntlm ", "negotiate "))
             transport = await pools.borrow((site["id"], base, host, sni), isolated=connection_auth)
@@ -435,7 +487,7 @@ def create_gateway(service):
                         raise ValueError("body_too_large")
                     yield chunk
         try:
-            has_body = int(length) > 0 or bool(request.headers.get("transfer-encoding"))
+            has_body = length > 0 or bool(request.headers.get("transfer-encoding"))
             started = time.monotonic()
             upstream = await client.send(client.build_request(request.method, target, headers=headers, content=limited_body() if has_body else None, extensions={"sni_hostname": sni}), stream=True)
             request.state.transfer["upstream_headers_ms"] = round((time.monotonic() - started) * 1000, 2)
@@ -463,7 +515,8 @@ def create_gateway(service):
                 if v.split("=", 1)[0].strip() in {PASS_COOKIE, "lb_admin"}:
                     continue
                 # Make explicit upstream-domain cookies host-only on the public domain.
-                v = ";".join(part for part in v.split(";") if not part.strip().lower().startswith("domain="))
+                parts = v.split(";")
+                v = ";".join([parts[0], *(part for part in parts[1:] if part.partition("=")[0].strip().lower() != "domain")])
             response_headers.append((k.encode("latin1"), v.encode("latin1")))
         async def close():
             try:
@@ -561,7 +614,7 @@ def create_gateway(service):
     async def websocket_proxy(ws: WebSocket, path: str):
         site = find_site(service, ws)
         ip, country = visitor(ws)
-        if not site or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
+        if not site or site.get("target") == "lanbridge" or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
             await ws.close(code=1008)
             return
         if ws.headers.get("origin") and ws.headers["origin"] != "https://" + site["hostname"]:

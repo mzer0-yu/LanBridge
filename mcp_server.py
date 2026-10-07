@@ -5,7 +5,7 @@ import sys
 from urllib.parse import urlsplit
 
 import httpx
-from lanbridge.models import Site
+from lanbridge.models import Site, Zone
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 SITE_SCHEMA = Site.model_json_schema()
@@ -13,6 +13,8 @@ SITE_SCHEMA = Site.model_json_schema()
 SITE_SCHEMA["additionalProperties"] = False
 ROUTES = {
     "lanbridge_status": ("GET", "state", EMPTY, "查看配置缺项、网站和连接器状态", True),
+    "lanbridge_list_zones": ("POST", "cloudflare/zones", EMPTY, "读取当前 Cloudflare 账户下可接入的 Active 域名", True),
+    "lanbridge_add_zone": ("POST", "zones", Zone.model_json_schema() | {"additionalProperties": False}, "核验并接入同一账户的域名；不改 DNS、不自动扩大令牌权限", False),
     "lanbridge_save_site": ("POST", "sites", SITE_SCHEMA, "保存网站与访问策略；缺少必填配置时拒绝新增", False),
     "lanbridge_prepare_connector": ("POST", "connector/ensure", EMPTY, "检测或从官方下载 cloudflared 并保存路径", False),
     "lanbridge_create_tunnel": ("POST", "cloudflare/create-tunnel", EMPTY, "创建 Tunnel 或恢复连接令牌", False),

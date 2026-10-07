@@ -19,6 +19,12 @@ def origin():
                 body = b"\x00\x01\xffbinary"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
+            elif self.path == "/cookie-attributes":
+                body = b"cookie-check"
+                self.send_response(200)
+                self.send_header("Set-Cookie", "private_session=abc; dOmAiN = .example.com; Path=/; HttpOnly")
+                self.send_header("Set-Cookie", "second=keep; Domain=.example.com; Max-Age=120; SameSite=Lax")
+                self.send_header("Set-Cookie", "domain=legitimate; Path=/; Secure")
             elif self.path == "/redirect":
                 body = b""
                 self.send_response(302)
@@ -135,3 +141,30 @@ def test_websocket_proxy_requires_grant_and_relays(service):
     finally:
         done.set()
         thread.join(timeout=5)
+
+
+def test_upstream_cookie_domain_whitespace_remains_host_only(service, origin):
+    service.save_site({"name":"cookies", "hostname":"app.example.com",
+                       "origin":f"http://127.0.0.1:{origin}", "human_check":False})
+    with TestClient(create_gateway(service), base_url="https://app.example.com") as client:
+        response = client.get("/cookie-attributes")
+        assert response.status_code == 200
+        cookies = response.headers.get_list("set-cookie")
+        assert len(cookies) == 3
+        assert cookies[2].startswith("domain=legitimate;")
+        assert all("domain" not in [part.partition("=")[0].strip().lower() for part in value.split(";")[1:]] for value in cookies)
+        assert "HttpOnly" in cookies[0] and "Max-Age=120" in cookies[1] and "SameSite=Lax" in cookies[1]
+        assert all(cookie.domain == "app.example.com" and not cookie.domain_specified for cookie in client.cookies.jar)
+
+
+def test_duplicate_connection_headers_filter_all_nominated_hop_headers():
+    from starlette.datastructures import Headers
+    from lanbridge.gateway import filtered_headers
+    headers = Headers(raw=[(b"connection",b"keep-alive, X-First"),
+                           (b"connection",b"X-Second"), (b"x-first",b"private-first"),
+                           (b"x-second",b"private-second"), (b"x-end-to-end",b"keep"),
+                           (b"set-cookie",b"a=1"), (b"set-cookie",b"b=2")])
+    remaining = filtered_headers(headers)
+    assert not any(key.lower() in {"connection","x-first","x-second"} for key, _ in remaining)
+    assert ("x-end-to-end", "keep") in remaining
+    assert [value for key,value in remaining if key.lower()=="set-cookie"] == ["a=1","b=2"]

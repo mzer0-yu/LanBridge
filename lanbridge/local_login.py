@@ -15,20 +15,40 @@ COOKIE = "lb_local_login"
 LIFETIME = 300
 
 
-def open_browser(url):
-    """Prefer Chrome, where the user may already have a password or session."""
+BROWSER_NAMES = {"default": "系统默认浏览器", "chrome": "Chrome", "edge": "Edge"}
+
+
+def browser_executable(browser):
+    suffixes = {"chrome": "Google/Chrome/Application/chrome.exe",
+                "edge": "Microsoft/Edge/Application/msedge.exe"}
+    if os.name != "nt" or browser not in suffixes:
+        return None
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(variable)
+        executable = Path(base) / suffixes[browser] if base else None
+        if executable and executable.is_file():
+            return executable
+    return None
+
+
+def available_browsers():
+    return [{"id": key, "name": name} for key, name in BROWSER_NAMES.items()
+            if key == "default" or browser_executable(key) is not None]
+
+
+def open_browser(url, browser="default"):
+    """Launch only a fixed, installed browser; never accept an executable path."""
+    if browser not in BROWSER_NAMES:
+        raise ValueError("浏览器选项无效")
     try:
-        if os.name == "nt":
-            for variable, suffix in (("PROGRAMFILES", "Google/Chrome/Application/chrome.exe"),
-                                     ("PROGRAMFILES(X86)", "Google/Chrome/Application/chrome.exe"),
-                                     ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe")):
-                base = os.environ.get(variable)
-                executable = Path(base) / suffix if base else None
-                if executable and executable.is_file():
-                    subprocess.Popen([str(executable), url], creationflags=subprocess.CREATE_NO_WINDOW)
-                    return True
-        return bool(webbrowser.open(url))
-    except OSError:
+        if browser == "default":
+            return bool(webbrowser.open(url))
+        executable = browser_executable(browser)
+        if not executable:
+            return False
+        subprocess.Popen([str(executable), url], creationflags=subprocess.CREATE_NO_WINDOW)
+        return True
+    except (OSError, webbrowser.Error):
         return False
 
 
@@ -42,7 +62,7 @@ class LocalLogin:
         self.lock = threading.RLock()
         self.requests = {}
 
-    def start(self, previous=""):
+    def start(self, previous="", browser="default"):
         with self.lock:
             now = time.time()
             for key, value in list(self.requests.items()):
@@ -53,7 +73,7 @@ class LocalLogin:
             request_id, proof = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
             self.requests[request_id] = {"proof": fingerprint(proof), "code": f"{secrets.randbelow(1000000):06d}",
                                          "expires_at": now + LIFETIME, "phase": "pending",
-                                         "admin": fingerprint(self.store.get("admin")["password_hash"])}
+                                         "admin": fingerprint(self.store.get("admin")["password_hash"]), "browser": browser}
             return request_id, proof, self.details(request_id)
 
     def get(self, request_id):
@@ -75,13 +95,25 @@ class LocalLogin:
     def decide(self, request_id, code, allow):
         with self.lock:
             job = self.get(request_id)
-            if job["phase"] != "pending" or not hmac.compare_digest(job["code"], str(code)):
+            candidate = str(code)
+            if (job["phase"] != "pending" or len(candidate) != 6
+                    or not candidate.isascii() or not candidate.isdecimal() or not hmac.compare_digest(job["code"], candidate)):
                 raise ValueError("登录请求已处理或确认码不匹配")
             job["phase"] = "approved" if allow else "denied"
             self.store.audit("local_login_approved" if allow else "local_login_denied", {})
 
-    def poll(self, request_id, proof, cancel=False):
+    def browser_for_open(self, request_id, proof):
         with self.lock:
+            job = self.get(request_id)
+            if not proof or not hmac.compare_digest(job["proof"], fingerprint(proof)):
+                raise ValueError("此登录请求不属于当前浏览器")
+            if job["phase"] != "pending":
+                raise ValueError("登录请求已处理，请重新发起")
+            return job["browser"]
+
+    def poll(self, request_id, proof, cancel=False, existing_token=""):
+        # Keep the password fingerprint check and session issuance atomic.
+        with self.lock, self.store.lock:
             job = self.get(request_id)
             if not proof or not hmac.compare_digest(job["proof"], fingerprint(proof)):
                 raise ValueError("此登录请求不属于当前浏览器")
@@ -90,7 +122,10 @@ class LocalLogin:
                 return {"phase": "cancelled"}, None
             phase = job["phase"]
             if phase == "approved":
-                session = self.store.login()
+                # Tabs in the same browser share the admin cookie. Rotating it here
+                # would invalidate the confirmation tab's in-memory CSRF value.
+                existing = self.store.session(existing_token) if existing_token else None
+                session = (None, existing["csrf"]) if existing and existing.get("scope") == "admin" else self.store.login()
                 del self.requests[request_id]
                 self.store.audit("admin_local_login", {})
                 return {"phase": "done", "csrf": session[1]}, session[0]

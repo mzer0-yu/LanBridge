@@ -7,7 +7,7 @@ def test_public_client_and_admin_locations_preserve_api_auth(service):
     client = TestClient(create_admin(service), base_url='http://127.0.0.1:8890')
     response = client.get('/', follow_redirects=False)
     assert response.status_code == 307 and response.headers['location'] == '/client'
-    assert '网站入口' in client.get('/client').text
+    assert '转发列表' in client.get('/client').text
     assert 'id="auth-form"' in client.get('/admin').text
     assert client.get('/admin/', follow_redirects=False).headers['location'] == '/admin'
     for path in ('/client.js', '/client.css'):

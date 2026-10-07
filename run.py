@@ -46,15 +46,34 @@ def serve(service, open_browser=False, authorize_cloudflare=False):
     from lanbridge.gateway_log import configure_runtime_logging
     runtime_log = configure_runtime_logging(service.store.root)
     cfg = service.settings()
+    pending_port = service.store.get("pending_gateway_port")
+    if pending_port:
+        cfg = Settings(**(cfg | {"gateway_port": pending_port})).model_dump()
     sockets = []
     try:
         for port in (cfg["admin_port"], cfg["gateway_port"]):
             sock = socket.socket()
             if os.name == "nt":
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            sock.bind(("127.0.0.1", port))
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                if not pending_port or port != pending_port:
+                    sock.close()
+                    raise
+                cfg = service.settings()
+                pending_port = None
+                sock.bind(("127.0.0.1", cfg["gateway_port"]))
+                print("待启用网关端口被占用，继续使用原端口；请在管理台选择其他端口。", flush=True)
             sock.listen(128)
             sockets.append(sock)
+        if pending_port:
+            if not service.store.get("previous_gateway_port"):
+                service.store.set("previous_gateway_port", service.settings()["gateway_port"])
+            service.store.set("settings", cfg)
+            service.store.set("pending_gateway_port", None)
+            if cfg["tunnel_id"]:
+                service.store.set("publication_error", "本机网关端口已修改，请在网站转发中点击重试发布，同步云端路由")
         gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], limit_concurrency=192, ws_max_size=8 * 1024 * 1024, ws_max_queue=2, h11_max_incomplete_event_size=16384, proxy_headers=False, access_log=False, log_config=None, timeout_graceful_shutdown=8, log_level="warning"))
         thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
         thread.start()
@@ -103,6 +122,11 @@ def main():
     credential.add_argument("name", choices=["cf_read_token", "cf_write_token", "turnstile_secret"])
     config = sub.add_parser("configure")
     config.add_argument("file", type=Path)
+    sub.add_parser("list-zones")
+    zone = sub.add_parser("add-zone")
+    zone.add_argument("file", type=Path)
+    remove_zone = sub.add_parser("remove-zone")
+    remove_zone.add_argument("zone_id")
     site = sub.add_parser("save-site")
     site.add_argument("file", type=Path)
     sub.add_parser("create-tunnel")
@@ -150,8 +174,14 @@ def main():
                             service.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, "null"))
                 result = {"saved": True}
             elif args.command == "configure":
-                cfg = Settings(**json.loads(args.file.read_text(encoding="utf-8-sig"))).model_dump()
                 old = service.settings()
+                data = json.loads(args.file.read_text(encoding="utf-8-sig"))
+                if "zones" in data and data["zones"] != old["zones"]:
+                    raise ValueError("请通过 add-zone / remove-zone 管理域名")
+                data["zones"] = old["zones"]
+                cfg = Settings(**data).model_dump()
+                if old["account_id"] and old["zones"] and old["account_id"] != cfg["account_id"]:
+                    raise ValueError("已接入域名属于当前账户，跨账户请使用独立数据目录")
                 if old["tunnel_id"] and cfg["tunnel_id"] != old["tunnel_id"]:
                     raise ValueError("不能修改已登记 Tunnel ID")
                 if cfg["tunnel_id"] and service.store.get("owned_tunnel") != cfg["tunnel_id"]:
@@ -160,8 +190,14 @@ def main():
                     raise ValueError("已有 Tunnel，不能切换账户或 Zone")
                 if old["zone_name"] != cfg["zone_name"] and service.sites():
                     raise ValueError("已有网站，不能切换 Zone")
-                service.store.set("settings", cfg)
+                service.commit_settings(cfg)
                 result = {"saved": True}
+            elif args.command == "list-zones":
+                result = {"attached": service.settings()["zones"], "available": service.cf.available_zones()}
+            elif args.command == "add-zone":
+                result = {"settings": service.add_zone(json.loads(args.file.read_text(encoding="utf-8-sig"))), "saved": True}
+            elif args.command == "remove-zone":
+                result = {"settings": service.remove_zone(args.zone_id), "saved": True}
             elif args.command == "save-site":
                 data = json.loads(args.file.read_text(encoding="utf-8-sig"))
                 if data.get("passcode_required"):

@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 import pytest
+import httpx
 from lanbridge.browser_auth import BrowserAuth, SCOPES
 from lanbridge.service import Service, digest
 
@@ -24,6 +25,63 @@ def browser(tmp_path, monkeypatch):
 
 def snapshot(token="oauth-access-secret", expiry=None):
     return {"path":"cloudflare/config/lanbridge.json", "profile":{"oauth_token": token, "refresh_token":"oauth-refresh-secret", "expiration_time":datetime.fromtimestamp(expiry or time.time()+3600, timezone.utc).isoformat(), "scopes": SCOPES}}
+
+
+def prepare_blank_authorization(browser, monkeypatch, count=1):
+    cfg=browser.service.settings() | {'account_id':'','zone_id':'','zone_name':''}
+    browser.service.store.set('settings',cfg)
+    choices=[{'account_id':'a'*32,'zone_id':str(i)*32,'zone_name':f'example{i}.com','account_name':'账户'} for i in range(1,count+1)]
+    monkeypatch.setattr(browser,'discover_zones',lambda _:choices)
+    fake_login(browser,monkeypatch)
+    return choices
+
+
+def test_one_zone_autofills_without_manual_ids(browser, monkeypatch):
+    choices=prepare_blank_authorization(browser,monkeypatch)
+    browser.start();browser.thread.join(timeout=5)
+    assert browser.status()['phase']=='done'
+    for key in ('account_id','zone_id','zone_name'):
+        assert browser.service.settings()[key]==choices[0][key]
+    assert browser.service.store.secret('cf_write_token')=='oauth-access-secret'
+
+
+@pytest.mark.parametrize('cancel', [False,True])
+def test_multiple_zones_require_selection_and_allow_cancel(browser, monkeypatch, cancel):
+    choices=prepare_blank_authorization(browser,monkeypatch,2)
+    browser.start()
+    deadline=time.time()+5
+    while browser.status()['phase']!='choosing_zone' and time.time()<deadline:
+        time.sleep(.02)
+    assert browser.status()['phase']=='choosing_zone'
+    assert browser.status()['zones']==choices
+    assert browser.service.settings()['zone_id']==''
+    assert browser.service.store.secret('cf_write_token')=='old-business-secret'
+    with pytest.raises(ValueError,match='已授权'):
+        browser.choose_zone('not-authorized')
+    if cancel:
+        browser.cancel()
+    else:
+        browser.choose_zone(choices[1]['zone_id'])
+    browser.thread.join(timeout=5)
+    assert browser.status()['phase']==('cancelled' if cancel else 'done')
+    assert browser.service.settings()['zone_id']==('' if cancel else choices[1]['zone_id'])
+
+
+def test_no_active_zone_does_not_save_credentials_or_settings(browser,monkeypatch):
+    prepare_blank_authorization(browser,monkeypatch,0)
+    browser.start();browser.thread.join(timeout=5)
+    assert browser.status()['phase']=='error'
+    assert browser.service.settings()['zone_id']==''
+    assert browser.service.store.secret('cf_write_token')=='old-business-secret'
+
+
+def test_discovery_filters_inactive_zones_and_only_returns_public_metadata(monkeypatch):
+    original=httpx.Client
+    payload={'success':True,'result':[{'id':'b'*32,'name':'example.com','status':'active','account':{'id':'a'*32,'name':'账户'},'private':'never copy'}, {'id':'c'*32,'name':'pending.com','status':'pending','account':{'id':'a'*32}}], 'result_info':{'total_pages':1}}
+    monkeypatch.setattr(httpx,'Client',lambda **kwargs:original(transport=httpx.MockTransport(lambda r:httpx.Response(200,json=payload)),**kwargs))
+    zones=BrowserAuth.discover_zones('secret')
+    assert zones==[{'account_id':'a'*32,'account_name':'账户','zone_id':'b'*32,'zone_name':'example.com'}]
+    assert 'secret' not in json.dumps(zones) and 'never copy' not in json.dumps(zones)
 
 def fake_login(browser, monkeypatch, scopes=None, change=False):
     calls=[]
@@ -137,7 +195,7 @@ def test_browser_endpoint_requires_auth_and_csrf(browser,monkeypatch):
     from lanbridge.store import password_hash
     browser.service.store.set("admin", {"username":"admin","password_hash":password_hash("correct horse battery")})
     calls=[]
-    monkeypatch.setattr(BrowserAuth,"start",lambda self:calls.append(True) or {"phase":"authorizing"})
+    monkeypatch.setattr(BrowserAuth,"start",lambda self, browser="default":calls.append(True) or {"phase":"authorizing"})
     client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
     assert client.post("/api/cloudflare/browser-authorize",json={}).status_code==401
     login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
@@ -224,7 +282,7 @@ def test_recovery_endpoints_require_admin_and_csrf(browser,monkeypatch,endpoint)
     browser.service.store.set("admin",{"username":"admin","password_hash":password_hash("correct horse battery")})
     calls=[]
     method="cancel" if endpoint.endswith("cancel") else "restart"
-    monkeypatch.setattr(BrowserAuth,method,lambda self:calls.append(True) or {"phase":"cancelled"})
+    monkeypatch.setattr(BrowserAuth,method,lambda self, browser=None:calls.append(True) or {"phase":"cancelled"})
     client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
     assert client.post("/api/cloudflare/"+endpoint,json={}).status_code==401
     login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
@@ -265,8 +323,141 @@ def test_widget_auto_endpoint_starts_full_browser_consent_for_old_profile(browse
     data=snapshot();data["profile"]["scopes"]=[s for s in SCOPES if s!="challenge-widgets.write"]
     browser.save_profile(data,browser.service.settings())
     browser.service.store.set("admin",{"username":"admin","password_hash":password_hash("correct horse battery")})
-    calls=[];monkeypatch.setattr(BrowserAuth,"start",lambda self:calls.append(True) or {"phase":"authorizing"})
+    calls=[];monkeypatch.setattr(BrowserAuth,"start",lambda self, browser="default":calls.append(True) or {"phase":"authorizing"})
     client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
     login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
     r=client.post("/api/cloudflare/turnstile-auto",json={},headers={"X-CSRF-Token":login.json()["csrf"]})
     assert r.status_code==200 and r.json()["phase"]=="authorizing" and calls==[True]
+
+
+def test_selected_browser_disables_cli_default_launcher(browser, monkeypatch):
+    monkeypatch.setattr("lanbridge.browser_auth.available_browsers", lambda: [{"id":"default"}, {"id":"chrome"}])
+    calls = fake_login(browser, monkeypatch)
+    browser.start("chrome")
+    browser.thread.join(timeout=5)
+    assert "--no-browser" in calls[0][0]
+    assert browser.status()["browser"] == "chrome"
+    assert browser.status()["phase"] == "done"
+
+
+def test_invalid_browser_cannot_start_or_cancel_existing_authorization(browser):
+    before = browser.status()
+    with pytest.raises(ValueError, match="已安装"):
+        browser.start("powershell.exe")
+    with pytest.raises(ValueError, match="已安装"):
+        browser.restart("powershell.exe")
+    assert browser.status() == before
+
+
+def test_private_cli_output_opens_only_selected_browser(browser, monkeypatch):
+    import subprocess
+    import sys
+    opened = []
+    monkeypatch.setattr("lanbridge.browser_auth.open_browser", lambda url, selected: opened.append((url, selected)) or True)
+    url = "https://dash.cloudflare.com/oauth2/auth?state=private-test-state"
+    code = "print('Visit this link to authenticate: '+" + repr(url) + ", flush=True)"
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    browser.communicate_browser(process, "edge", 5)
+    assert opened == [(url, "edge")]
+    assert "private-test-state" not in str(browser.status())
+
+
+def test_unexpected_cli_url_never_opens_browser(browser, monkeypatch):
+    import subprocess
+    import sys
+    opened = []
+    monkeypatch.setattr("lanbridge.browser_auth.open_browser", lambda *args: opened.append(args) or True)
+    code = "print('https://dash.cloudflare.com.evil.example/oauth2/auth?state=bad', flush=True)"
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with pytest.raises(ValueError, match="未返回授权地址"):
+        browser.communicate_browser(process, "chrome", 5)
+    assert not opened
+
+
+def test_cli_reader_failure_terminates_child_and_preserves_credentials(browser, monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    processes = []
+    original = subprocess.Popen
+    def start(*args, **kwargs):
+        process = original(*args, **kwargs)
+        processes.append(process)
+        return process
+    monkeypatch.setattr("lanbridge.browser_auth.subprocess.Popen", start)
+    def failed_reader(*args):
+        raise OSError("simulated pipe failure")
+    monkeypatch.setattr(browser, "communicate_browser", failed_reader)
+    with pytest.raises(OSError, match="pipe failure"):
+        browser.run([sys.executable, "-c", "import time; time.sleep(60)"], {}, tmp_path,
+                    ["auth", "create", "--no-browser"], timeout=5)
+    assert len(processes) == 1 and processes[0].poll() is not None
+    assert browser.process is None
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+    assert processes[0].stdout.closed and processes[0].stderr.closed
+
+
+@pytest.mark.parametrize("scopes", [None, [{}], {scope: True for scope in SCOPES}])
+def test_malformed_profile_scopes_are_rejected(browser, tmp_path, scopes):
+    data = snapshot()["profile"] | {"scopes": scopes}
+    (tmp_path / "lanbridge.json").write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="权限"):
+        browser.read_profile(tmp_path)
+
+
+def test_malformed_profile_sets_error_instead_of_leaving_running_status(browser, monkeypatch):
+    fake_login(browser, monkeypatch)
+    original = browser.run
+    def malformed(command, env, cwd, args, timeout=45):
+        result = original(command, env, cwd, args, timeout)
+        if args[:2] == ["auth", "create"]:
+            path = cwd / snapshot()["path"]
+            data = json.loads(path.read_text())
+            data["scopes"] = None
+            path.write_text(json.dumps(data), encoding="utf-8")
+        return result
+    monkeypatch.setattr(browser, "run", malformed)
+    browser.start()
+    browser.thread.join(timeout=5)
+    assert not browser.thread.is_alive()
+    assert browser.status()["phase"] == "error"
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+    assert not browser.service.store.secret("cf_oauth_profile")
+
+
+@pytest.mark.parametrize("failure", ["encryption", "database"])
+def test_failed_browser_profile_commit_keeps_discovered_settings_and_credentials(browser, monkeypatch, failure):
+    from test_atomic_configuration import reject_write
+    prepare_blank_authorization(browser, monkeypatch)
+    before = browser.service.settings()
+    updated_at = browser.service.store.get("credential_updated_at")
+    if failure == "encryption":
+        def reject(value):
+            raise RuntimeError("private-encryption-diagnostic")
+        monkeypatch.setattr(browser.service.store.cipher, "encrypt", reject)
+    else:
+        reject_write(browser.service.store, "cf_oauth_profile", "secrets")
+    browser.start()
+    browser.thread.join(timeout=5)
+    assert not browser.thread.is_alive()
+    assert browser.status()["phase"] == "error"
+    assert "private-encryption-diagnostic" not in json.dumps(browser.status())
+    assert browser.service.settings() == before
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+    assert not browser.service.store.secret("cf_oauth_profile")
+    assert browser.service.store.get("managed_business_token") is None
+    assert browser.service.store.get("credential_updated_at") == updated_at
+
+
+def test_browser_discovery_cannot_persist_primary_zone_beyond_capacity(browser, monkeypatch):
+    prepare_blank_authorization(browser, monkeypatch)
+    cfg = browser.service.settings() | {"zones": [
+        {"zone_id": format(i, "032x"), "zone_name": f"zone{i}.example.com"} for i in range(100)]}
+    browser.service.store.set("settings", cfg)
+    before = browser.service.settings()
+    browser.start()
+    browser.thread.join(timeout=5)
+    assert not browser.thread.is_alive()
+    assert browser.status()["phase"] == "error"
+    assert browser.service.store.get("settings") == cfg
+    assert browser.service.settings() == before
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"

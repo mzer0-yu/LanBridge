@@ -280,3 +280,24 @@ def test_force_new_replaces_managed_credential_without_modifying_old_token(manag
     assert len([r for r in calls if r.method == "POST"]) == 2
     with pytest.raises(ValueError, match="选项无效"):
         manager.provision("authority-token-secret-value", target=target, force_new=True, repair_existing=True)
+
+
+@pytest.mark.parametrize("options", [
+    {"authority": None}, {"authority": ["invalid"]}, {"authority": {"invalid": True}},
+    {"authority": 123}, {"remember": "false"}, {"remember": None},
+    {"human_check": "false"}, {"human_check": None},
+])
+def test_provision_invalid_input_rejected_before_network_or_storage(manager, monkeypatch, options):
+    original = manager.service.store.secret("cf_write_token")
+    calls = []
+    def no_network(*args):
+        calls.append(args)
+        raise AssertionError("invalid controls must be rejected before network")
+    monkeypatch.setattr(manager, "request", no_network)
+    arguments = {"authority": "isolated-authority-token"} | options
+    with pytest.raises(ValueError):
+        manager.provision(**arguments)
+    assert not calls
+    assert manager.service.store.secret("cf_write_token") == original
+    assert not manager.service.store.secret("cf_token_authority")
+    assert not manager.service.store.get("pending_business_token")

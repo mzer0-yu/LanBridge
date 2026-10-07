@@ -155,3 +155,169 @@ def test_rotated_transfer_logs_remain_bounded_and_do_not_propagate(tmp_path):
     files = list(tmp_path.glob("gateway.log*"))
     assert len(files) == 4 and sum(f.stat().st_size for f in files) < 4000
     assert not logger.propagate
+
+
+def test_idle_transport_close_does_not_block_borrow_and_shutdown_waits():
+    async def run():
+        pool = UpstreamPools(idle_seconds=.02)
+        entered, finish = asyncio.Event(), asyncio.Event()
+        class SlowTransport:
+            closed = False
+            async def aclose(self):
+                entered.set()
+                await finish.wait()
+                self.closed = True
+        old = SlowTransport()
+        lifecycle = pool.lifespan(None)
+        await lifecycle.__aenter__()
+        lease = await pool.borrow(("old", "http://127.0.0.1", "old", "old"))
+        await lease.entry["transport"].aclose()
+        lease.entry["transport"] = old
+        await lease.aclose()
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            fresh = await asyncio.wait_for(pool.borrow(("new", "http://127.0.0.2", "new", "new")), .5)
+            await fresh.aclose()
+            shutdown = asyncio.create_task(lifecycle.__aexit__(None, None, None))
+            await asyncio.sleep(.02)
+            assert not shutdown.done()
+            finish.set()
+            await asyncio.wait_for(shutdown, 1)
+            assert old.closed and not pool.entries
+        finally:
+            finish.set()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel_borrow", [False, True])
+def test_demand_retirement_does_not_hold_lock_or_lose_close_on_cancel(cancel_borrow):
+    async def run():
+        pool = UpstreamPools(maximum=3, idle_seconds=30)
+        entered, finish = asyncio.Event(), asyncio.Event()
+        class SlowTransport:
+            closed = False
+            async def aclose(self):
+                entered.set()
+                await finish.wait()
+                self.closed = True
+        old_key = ("old", "http://127.0.0.1", "old", "old")
+        changed_key = ("old", "http://127.0.0.2", "old", "old")
+        other_key = ("other", "http://127.0.0.3", "other", "other")
+        old = SlowTransport()
+        async with pool.lifespan(None):
+            lease = await pool.borrow(old_key)
+            await lease.entry["transport"].aclose()
+            lease.entry["transport"] = old
+            await lease.aclose()
+            other = await pool.borrow(other_key)
+            pending = asyncio.create_task(pool.borrow(changed_key))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                if cancel_borrow:
+                    pending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await pending
+                else:
+                    fresh = await asyncio.wait_for(pool.borrow(other_key), .2)
+                    await fresh.aclose()
+            finally:
+                finish.set()
+                if not pending.cancelled():
+                    replacement = await pending
+                    await replacement.aclose()
+                await other.aclose()
+        assert old.closed, "cancelled borrower lost ownership of the detached transport"
+        assert not pool.entries
+    asyncio.run(run())
+
+
+def test_reaper_close_failure_does_not_abandon_other_transports(caplog):
+    async def run():
+        pool = UpstreamPools(idle_seconds=.02)
+        attempted = asyncio.Event()
+        class FailingTransport:
+            async def aclose(self):
+                attempted.set()
+                raise OSError("isolated close failure")
+        class OtherTransport:
+            closed = False
+            async def aclose(self):
+                self.closed = True
+        good = OtherTransport()
+        async with pool.lifespan(None):
+            for key, transport in [("bad", FailingTransport()), ("good", good)]:
+                lease = await pool.borrow((key, "http://127.0.0.1", key, key))
+                await lease.entry["transport"].aclose()
+                lease.entry["transport"] = transport
+                await lease.aclose()
+            await asyncio.wait_for(attempted.wait(), 1)
+        assert good.closed, "a failed close abandoned another detached transport"
+        assert not pool.entries
+    asyncio.run(run())
+    assert "OSError" in caplog.text
+
+
+def test_concurrent_eviction_and_cancellation_keep_transport_count_bounded(monkeypatch):
+    import lanbridge.upstream as upstream
+    async def run():
+        finish = asyncio.Event()
+        counts = {"live": 0, "peak": 0}
+        class Transport:
+            def __init__(self, **kwargs):
+                self.closed = False
+                counts["live"] += 1
+                counts["peak"] = max(counts["peak"], counts["live"])
+            async def aclose(self):
+                await finish.wait()
+                if not self.closed:
+                    self.closed = True
+                    counts["live"] -= 1
+        monkeypatch.setattr(upstream.httpx, "AsyncHTTPTransport", Transport)
+        pool = UpstreamPools(maximum=2, connections=2)
+        async with pool.lifespan(None):
+            original = await pool.borrow(("old", "http://127.0.0.1", "old", "old"))
+            await original.aclose()
+            tasks = [asyncio.create_task(pool.borrow((str(n), "http://127.0.0.1", str(n), str(n)))) for n in range(12)]
+            await asyncio.sleep(.02)
+            for task in tasks:
+                if not task.done(): task.cancel()
+            finish.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if not isinstance(result, BaseException): await result.aclose()
+        assert counts["peak"] <= pool.maximum
+        assert counts["live"] == 0
+    asyncio.run(run())
+
+
+def test_waiting_borrow_cannot_create_transport_after_shutdown_starts():
+    async def run():
+        pool = UpstreamPools(maximum=1, idle_seconds=30)
+        entered, finish = asyncio.Event(), asyncio.Event()
+        class SlowTransport:
+            closed = False
+            async def aclose(self):
+                entered.set()
+                await finish.wait()
+                self.closed = True
+        old = SlowTransport()
+        lifecycle = pool.lifespan(None)
+        await lifecycle.__aenter__()
+        lease = await pool.borrow(("old", "http://127.0.0.1", "old", "old"))
+        await lease.entry["transport"].aclose()
+        lease.entry["transport"] = old
+        await lease.aclose()
+        pending = asyncio.create_task(pool.borrow(("new", "http://127.0.0.2", "new", "new")))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            shutdown = asyncio.create_task(lifecycle.__aexit__(None, None, None))
+            await asyncio.sleep(.02)
+            finish.set()
+            result = (await asyncio.gather(pending, return_exceptions=True))[0]
+            if not isinstance(result, BaseException): await result.aclose()
+            await asyncio.wait_for(shutdown, 1)
+            assert isinstance(result, httpx.PoolTimeout)
+            assert old.closed and not pool.entries and not pool.closing
+        finally:
+            finish.set()
+    asyncio.run(run())

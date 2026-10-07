@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,15 +23,36 @@ def version(path):
     return result.stdout.strip()[:160]
 
 
-def ensure_cloudflared(configured=""):
+def check_cloudflared_update(configured=""):
+    path = configured or shutil.which("cloudflared") or str(TOOL_DIR / "cloudflared.exe")
+    current = version(path) if Path(path).is_file() else ""
+    try:
+        with httpx.Client(timeout=20, follow_redirects=True, proxy=getproxies().get("https"), headers={"User-Agent": "LanBridge"}) as client:
+            response = client.get(RELEASE_API)
+            response.raise_for_status()
+            tag = response.json().get("tag_name", "")
+        if not re.fullmatch(r"\d{4}\.\d+\.\d+", tag):
+            raise ValueError("官方版本信息无效，请稍后重试")
+        match = re.search(r"cloudflared version (\d{4}\.\d+\.\d+)", current)
+        newer = not match or tuple(map(int, tag.split("."))) > tuple(map(int, match[1].split(".")))
+        return {"current": current, "latest": tag, "available": newer, "installed": bool(current)}
+    except httpx.HTTPError:
+        raise ValueError("无法检查官方更新，请稍后重试") from None
+
+
+def ensure_cloudflared(configured="", *, update_tag=None):
+    if update_tag is not None and not re.fullmatch(r"\d{4}\.\d+\.\d+", update_tag):
+        raise ValueError("更新版本无效，请重新检查更新")
+    if update_tag is not None:
+        configured = ""
     if configured:
         path = Path(configured)
         if not path.is_absolute() or not path.is_file():
             raise ValueError("指定路径不存在，请修正路径或清空后自动检测")
         return {"path": str(path), "source": "configured", "version": version(path)}
     found = shutil.which("cloudflared")
-    local = TOOL_DIR / "cloudflared.exe"
-    if found or local.is_file():
+    local = TOOL_DIR / (f"cloudflared-{update_tag}.exe" if update_tag else "cloudflared.exe")
+    if update_tag is None and (found or local.is_file()):
         path = Path(found) if found else local
         return {"path": str(path.resolve()), "source": "PATH" if found else "local", "version": version(path)}
     if os.name != "nt":
@@ -45,6 +67,8 @@ def ensure_cloudflared(configured=""):
         with httpx.Client(timeout=60, follow_redirects=True, proxy=getproxies().get("https"), headers={"User-Agent": "LanBridge"}) as client:
             response = client.get(RELEASE_API)
             response.raise_for_status()
+            if update_tag and response.json().get("tag_name") != update_tag:
+                raise ValueError("官方版本已变化，请重新检查更新")
             asset = next((a for a in response.json().get("assets", []) if a["name"] == f"cloudflared-windows-{arch}.exe"), None)
             if not asset or not asset.get("digest", "").startswith("sha256:"):
                 raise ValueError("官方发布未提供可核验的安装包，请稍后重试或手动安装")
@@ -65,6 +89,10 @@ def ensure_cloudflared(configured=""):
             if size != asset["size"] or checksum.hexdigest() != asset["digest"].split(":", 1)[1]:
                 raise ValueError("安装包完整性校验失败，未安装，请重试")
             verified_version = version(temp)
+            if update_tag and not re.search(r"cloudflared version " + re.escape(update_tag) + r"(?:\s|$)", verified_version):
+                raise ValueError("安装包版本不匹配，未更新")
+            if update_tag and local.exists():
+                local = TOOL_DIR / (f"cloudflared-{update_tag}-{os.urandom(4).hex()}.exe")
             temp.replace(local)
             return {"path": str(local), "source": "download", "version": verified_version}
     except httpx.HTTPError:

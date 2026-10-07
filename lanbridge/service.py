@@ -15,8 +15,11 @@ import time
 from urllib.parse import urlsplit
 
 import httpx
-from .models import Settings, Site
+from .models import Settings, Site, Zone
 from .store import Store, password_hash
+
+LAN_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7"))
 
 
 def digest(value):
@@ -41,8 +44,7 @@ def lan_address(host):
             addresses = [ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)]
         except OSError:
             raise ValueError("无法解析局域网源站地址") from None
-    nets = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7")]
-    if not addresses or any(not any(a.version == n.version and a in n for n in nets) for a in addresses):
+    if not addresses or any(not any(a.version == n.version and a in n for n in LAN_NETWORKS) for a in addresses):
         raise ValueError("源站必须解析到局域网或本机地址（不支持公网、链路本地地址）")
     return str(addresses[0])
 
@@ -50,6 +52,10 @@ def lan_address(host):
 def pinned_origin(site, settings):
     u = urlsplit(site["origin"])
     port = u.port or (443 if u.scheme == "https" else 80)
+    if site.get("target") == "lanbridge":
+        if u.scheme != "http" or u.hostname != "127.0.0.1" or port != settings["admin_port"]:
+            raise ValueError("LanBridge 入口源站由平台自动设置")
+        return site["origin"], u.netloc, u.hostname
     if port in (settings["admin_port"], settings["gateway_port"]):
         raise ValueError("不能转发管理台或网关自身端口")
     address = lan_address(u.hostname)
@@ -93,7 +99,8 @@ class Cloudflare:
                     with self.service.lock:
                         issues = self.service.store.get("cloudflare_permission_issues", {})
                         cfg = self.service.settings()
-                        issues[digest([method, path])] = {"detail": detail, "http_status": response.status_code, "credential": credential, "checked_at": time.time(), "context": [cfg["account_id"], cfg["zone_id"]], "credential_digest": digest(token)}
+                        match = re.match(r"/zones/([a-f0-9]{32})(?:/|$)", path)
+                        issues[digest([method, path])] = {"detail": detail, "http_status": response.status_code, "credential": credential, "checked_at": time.time(), "context": [cfg["account_id"], match[1] if match else cfg["zone_id"]], "credential_digest": digest(token)}
                         self.service.store.set("cloudflare_permission_issues", issues)
                 raise RuntimeError(detail)
             payload = response.json()
@@ -145,16 +152,33 @@ class Cloudflare:
             raise ValueError("请配置账户并创建独立 Tunnel")
         return f'/accounts/{cfg["account_id"]}/cfd_tunnel/{cfg["tunnel_id"]}'
 
-    def zone(self):
+    def zone(self, selected=None):
         cfg = self.service.settings()
-        if not cfg["zone_id"]:
+        selected = selected or {"zone_id": cfg["zone_id"], "zone_name": cfg["zone_name"]}
+        if not selected["zone_id"]:
             raise ValueError("请配置 Zone ID")
-        result = self.request("GET", f'/zones/{cfg["zone_id"]}')
-        if result.get("name") != cfg["zone_name"] or result.get("account", {}).get("id") != cfg["account_id"]:
+        result = self.request("GET", f'/zones/{selected["zone_id"]}')
+        if result.get("name") != selected["zone_name"] or result.get("account", {}).get("id") != cfg["account_id"]:
             raise ValueError("域名、Zone ID 和账户 ID 不匹配")
         if result.get("status") != "active":
             raise ValueError("Cloudflare 域名尚未 Active，请先完成 nameserver 接入")
         return result
+
+    def available_zones(self):
+        account = self.service.settings()["account_id"]
+        if not account:
+            raise ValueError("请先配置 Cloudflare 账户")
+        zones = []
+        for page in range(1, 101):
+            rows = self.request("GET", f'/zones?account.id={account}&status=active&per_page=50&page={page}')
+            if not isinstance(rows, list):
+                raise ValueError("Cloudflare 域名列表格式异常")
+            for row in rows:
+                if row.get("status") == "active" and row.get("account", {}).get("id") == account:
+                    zones.append(Zone(zone_id=row["id"], zone_name=row["name"]).model_dump())
+            if len(rows) < 50:
+                return sorted(zones, key=lambda z: z["zone_name"])
+        raise ValueError("账户域名过多，请手动填写要接入的域名")
 
     def create_tunnel(self):
         with self.service.lock:
@@ -187,9 +211,8 @@ class Cloudflare:
                         raise
                 cfg["tunnel_id"] = result["id"]
                 cfg["tunnel_name"] = result.get("name", cfg["tunnel_name"])
-                self.service.store.set("settings", cfg)
-                self.service.store.set("owned_tunnel", result["id"])
-                self.service.store.set("pending_tunnel_create", None)
+                cfg = Settings(**cfg).model_dump()
+                self.service.store.set_many({"settings": cfg, "owned_tunnel": result["id"], "pending_tunnel_create": None})
                 self.service.store.audit("tunnel_created", {"id": result["id"]})
             token = self.request("GET", self.tunnel_path() + "/token")
             if not isinstance(token, str) or not 10 <= len(token) <= 4096:
@@ -232,12 +255,14 @@ class Cloudflare:
                         rows = self.request("GET", path + f"?page={page}&per_page=100")
                         if not isinstance(rows, list):
                             raise RuntimeError("无法核对先前 Widget 创建结果，未重复创建")
-                        matches.extend(r for r in rows if r.get("name") == pending["name"])
+                        matches.extend(r for r in rows if isinstance(r, dict) and r.get("name") == pending["name"])
                         if len(rows) < 100:
                             break
                     if len(matches) != 1:
                         raise ValueError("先前 Widget 创建结果待核对，未重复创建；请稍后重试自动配置")
-                    existing = matches[0]["sitekey"]
+                    existing = matches[0].get("sitekey")
+                if not isinstance(existing, str) or not existing.strip():
+                    raise RuntimeError("Widget 核对结果不完整，未重复创建")
             if existing:
                 result = self.request("GET", path + "/" + existing)
                 domains = sorted(set(result.get("domains", [])) | set(hosts))
@@ -256,7 +281,7 @@ class Cloudflare:
                     if re.search(r"Cloudflare API HTTP 4\d\d", str(exc)):
                         store.set("pending_widget_create", None)
                     raise
-                if not isinstance(result, dict) or not result.get("sitekey"):
+                if not isinstance(result, dict) or not isinstance(result.get("sitekey"), str) or not result["sitekey"].strip():
                     raise RuntimeError("Widget 创建结果不完整，请重试核对")
                 existing = result["sitekey"]
                 store.set("pending_widget_create", store.get("pending_widget_create") | {"sitekey": existing})
@@ -295,20 +320,29 @@ class Cloudflare:
         before = remote.get("config") or {"ingress": [{"service": "http_status:404"}]}
         version = remote.get("version")
         owned = set(self.service.store.get("published_hosts", [])) | {s["hostname"] for s in all_sites}
+        gateway_services = {f'http://127.0.0.1:{cfg["gateway_port"]}'}
+        previous_port = self.service.store.get("previous_gateway_port")
+        if previous_port:
+            gateway_services.add(f'http://127.0.0.1:{previous_port}')
         for rule in before.get("ingress", []):
-            if rule.get("hostname") in owned and (rule.get("path") or rule.get("service") != f'http://127.0.0.1:{cfg["gateway_port"]}'):
+            if rule.get("hostname") in owned and (rule.get("path") or rule.get("service") not in gateway_services):
                 raise ValueError("远端路由与平台登记不一致，请检查 Cloudflare 中的手工变更")
         after = deepcopy(before)
         keep = [r for r in before.get("ingress", []) if r.get("hostname") and r.get("hostname") not in owned]
         # Keep unrelated ingress settings; platform owns only its own hostname rules and final deny.
         after["ingress"] = keep + [{"hostname": s["hostname"], "service": f'http://127.0.0.1:{cfg["gateway_port"]}'} for s in sites] + [{"service": "http_status:404"}]
         dns = []
+        verified_zones = {cfg["zone_id"]}
         for site in sites:
-            records = self.request("GET", f'/zones/{cfg["zone_id"]}/dns_records?name={site["hostname"]}')
+            selected = self.service.site_zone(site)
+            if selected["zone_id"] not in verified_zones:
+                self.zone(selected)
+                verified_zones.add(selected["zone_id"])
+            records = self.request("GET", f'/zones/{selected["zone_id"]}/dns_records?name={site["hostname"]}')
             target = cfg["tunnel_id"] + ".cfargotunnel.com"
             if records and (len(records) != 1 or records[0].get("type") != "CNAME" or records[0].get("content", "").rstrip(".") != target or not records[0].get("proxied")):
                 raise ValueError(f'{site["hostname"]} 已有冲突 DNS，平台不会覆盖')
-            dns.append({"hostname": site["hostname"], "existing": [{"id": r["id"], "type": r["type"], "content": r["content"], "proxied": r["proxied"]} for r in records],
+            dns.append({"hostname": site["hostname"], "zone_id": selected["zone_id"], "zone_name": selected["zone_name"], "existing": [{"id": r["id"], "type": r["type"], "content": r["content"], "proxied": r["proxied"]} for r in records],
                         "create": not records, "target": target})
         full = {"settings": cfg, "sites": all_sites, "remote": before, "version": version, "dns": dns, "after": after}
         revision = digest(full)
@@ -330,7 +364,7 @@ class Cloudflare:
                 # DNS is prepared first; no active ingress for a new host until config succeeds.
                 for item in latest["dns"]:
                     if item["create"]:
-                        result = self.request("POST", f'/zones/{cfg["zone_id"]}/dns_records', {"type": "CNAME", "name": item["hostname"], "content": item["target"], "proxied": True, "ttl": 1})
+                        result = self.request("POST", f'/zones/{item["zone_id"]}/dns_records', {"type": "CNAME", "name": item["hostname"], "content": item["target"], "proxied": True, "ttl": 1})
                         created.append(result["id"])
                 if latest["routes_changed"]:
                     self.request("PUT", self.tunnel_path() + "/configurations", {"config": latest["after"]})
@@ -338,10 +372,12 @@ class Cloudflare:
                 if not tunnel_config_equal(actual.get("config"), latest["after"]):
                     raise RuntimeError("远端配置写后核验失败，请重新预览并检查远端")
                 for item in latest["dns"]:
-                    rows = self.request("GET", f'/zones/{cfg["zone_id"]}/dns_records?name={item["hostname"]}')
+                    rows = self.request("GET", f'/zones/{item["zone_id"]}/dns_records?name={item["hostname"]}')
                     if not any(r.get("type") == "CNAME" and r.get("content", "").rstrip(".") == item["target"] and r.get("proxied") for r in rows):
                         raise RuntimeError("DNS 写后核验失败")
                 self.service.store.set("published_hosts", [s["hostname"] for s in self.service.sites() if s["enabled"]])
+                self.service.store.set("publication_error", None)
+                self.service.store.set("previous_gateway_port", None)
                 self.service.store.audit("publish_verified", {"revision": revision, "created_dns": created})
                 return {"verified": True, "restart_required": False}
             except Exception:
@@ -360,8 +396,52 @@ class Connector:
     def __init__(self, service):
         self.service, self.process = service, None
         self.started_at = None
-        self.lock = threading.Lock()
-        self.install_lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.install_lock = threading.RLock()
+        self.version_lock = threading.Lock()
+        self.version_cache = (None, "")
+
+    def check_update(self):
+        from .tools import check_cloudflared_update
+        with self.install_lock:
+            return check_cloudflared_update(self.service.settings()["cloudflared_path"])
+
+    def update(self, tag):
+        from .tools import ensure_cloudflared
+        with self.lock, self.install_lock:
+            checked = self.check_update()
+            if not checked["available"] or checked["latest"] != tag:
+                raise ValueError("没有匹配的可用更新，请重新检查版本")
+            old_path = self.service.settings()["cloudflared_path"]
+            running = self.status()["running"]
+            result = ensure_cloudflared(update_tag=tag)
+            with self.service.lock:
+                if self.service.settings()["cloudflared_path"] != old_path:
+                    raise ValueError("连接器路径已改变，请重新检查更新")
+                try:
+                    if running:
+                        self.stop()
+                    cfg = self.service.settings()
+                    cfg["cloudflared_path"] = result["path"]
+                    self.service.store.set("settings", cfg)
+                    if running:
+                        self.start()
+                        time.sleep(1)
+                        if not self.status()["running"]:
+                            raise ValueError("新版本连接器启动失败")
+                except Exception as exc:
+                    self.stop()
+                    cfg = self.service.settings()
+                    cfg["cloudflared_path"] = old_path
+                    self.service.store.set("settings", cfg)
+                    if running:
+                        try:
+                            self.start()
+                        except Exception:
+                            raise ValueError("更新失败，旧版本已保留，但恢复运行失败，请手动启动连接器") from exc
+                    raise ValueError("更新失败，已恢复原配置和运行状态") from exc
+                self.service.store.audit("connector_updated", {"version": result["version"], "running_restored": running})
+            return result | {"running_restored": running}
 
     def ensure(self, configured=None):
         from .tools import ensure_cloudflared
@@ -375,10 +455,22 @@ class Connector:
             return result
 
     def status(self):
+        from .tools import TOOL_DIR, version
         cfg = self.service.settings()
-        path = cfg["cloudflared_path"] or shutil.which("cloudflared")
+        path = cfg["cloudflared_path"] or shutil.which("cloudflared") or str(TOOL_DIR / "cloudflared.exe")
+        installed = bool(path and Path(path).is_file())
+        with self.version_lock:
+            try:
+                stat = Path(path).stat() if installed else None
+                key = (path, stat.st_mtime_ns, stat.st_size) if stat else None
+                if key != self.version_cache[0]:
+                    self.version_cache = (key, "")
+                    self.version_cache = (key, version(path) if installed else "")
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+            current_version = self.version_cache[1]
         running = self.process is not None and self.process.poll() is None
-        return {"installed": bool(path and Path(path).is_file()), "running": running,
+        return {"installed": installed, "version": current_version, "running": running,
                 "pid": self.process.pid if running else None, "started_at": self.started_at,
                 "last_exit": self.process.poll() if self.process else None}
 
@@ -419,29 +511,78 @@ class Service:
     def __init__(self, root: Path):
         self.store = Store(root)
         self.lock = threading.RLock()
-        if self.store.get("settings") is None:
-            defaults = Settings().model_dump()
-            binary = Path(__file__).resolve().parents[1] / "bin" / "cloudflared.exe"
-            if binary.is_file():
-                defaults["cloudflared_path"] = str(binary)
-            self.store.set("settings", defaults)
-        existing = self.store.get("settings", {})
-        if existing.get("tunnel_name") == "lanbridge-windows" and not existing.get("tunnel_id") and not self.store.get("owned_tunnel") and not self.store.get("pending_tunnel_create"):
-            self.store.set("settings", existing | {"tunnel_name": "LanBridge"})
-        if not self.store.secret("signing_key"):
-            self.store.set_secret("signing_key", secrets.token_urlsafe(48))
+        try:
+            with self.store.lock, self.store.db:
+                self.store.db.execute("BEGIN IMMEDIATE")
+                if self.store.get("settings") is None:
+                    defaults = Settings().model_dump()
+                    binary = Path(__file__).resolve().parents[1] / "bin" / "cloudflared.exe"
+                    if binary.is_file():
+                        defaults["cloudflared_path"] = str(binary)
+                    self.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("settings", json.dumps(defaults)))
+                existing = self.store.get("settings", {})
+                if existing.get("tunnel_name") == "lanbridge-windows" and not existing.get("tunnel_id") and not self.store.get("owned_tunnel") and not self.store.get("pending_tunnel_create"):
+                    self.store.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("settings", json.dumps(existing | {"tunnel_name": "LanBridge"})))
+                if not self.store.secret("signing_key"):
+                    encrypted = self.store.cipher.encrypt(secrets.token_urlsafe(48).encode()).decode()
+                    self.store.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", ("signing_key", encrypted))
+        except BaseException:
+            self.store.db.close()
+            raise
         self.cf = Cloudflare(self)
         self.connector = Connector(self)
 
+    def set_public_client_enabled(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError("公网转发列表开关必须为布尔值")
+        with self.lock:
+            self.store.set("public_client_enabled", enabled)
+            self.store.audit("public_client_changed", {"enabled": enabled})
+        return {"enabled": enabled, "saved": True}
+
     def settings(self):
         return Settings(**self.store.get("settings", {})).model_dump()
+
+    def commit_settings(self, cfg):
+        """Keep visitor invalidation consistent for CLI and API configuration changes."""
+        with self.lock:
+            cfg = Settings(**cfg).model_dump()
+            values, secret_values = {"settings": cfg}, {}
+            if cfg["turnstile_sitekey"] != self.settings()["turnstile_sitekey"]:
+                sites = self.sites()
+                for site in sites:
+                    site["policy_version"] = secrets.token_hex(8)
+                values.update(owned_widget="", sites=sites)
+                secret_values["signing_key"] = secrets.token_urlsafe(48)
+            self.store.set_many(values, secret_values=secret_values)
+
+    def queue_gateway_port(self, port):
+        import socket
+        with self.lock:
+            cfg = self.settings()
+            if isinstance(port, bool) or not isinstance(port, int):
+                raise ValueError("端口必须为 1024–65535 的整数")
+            cfg = Settings(**(cfg | {"gateway_port": port})).model_dump()
+            for site in self.sites():
+                if site.get("target") != "lanbridge":
+                    pinned_origin(site, cfg)
+            pending = port if port != self.settings()["gateway_port"] else None
+            if pending:
+                try:
+                    with socket.socket() as listener:
+                        listener.bind(("127.0.0.1", port))
+                except OSError:
+                    raise ValueError("该端口已被占用，请选择其他端口") from None
+            self.store.set("pending_gateway_port", pending)
+            self.store.audit("gateway_port_scheduled", {"port": port})
+            return {"saved": True, "pending_gateway_port": pending, "restart_required": bool(pending)}
 
     def permission_issues(self):
         cfg = self.settings()
         result = []
         changed = self.store.get("credential_updated_at", {})
         for issue in self.store.get("cloudflare_permission_issues", {}).values():
-            if issue.get("context") and issue["context"] != [cfg["account_id"], cfg["zone_id"]]:
+            if issue.get("context") and issue["context"] not in [[cfg["account_id"], z["zone_id"]] for z in cfg["zones"]] + [[cfg["account_id"], cfg["zone_id"]]]:
                 continue
             credential = issue.get("credential", "cf_write_token")
             replaced = changed.get(credential, 0) > issue["checked_at"]
@@ -451,7 +592,55 @@ class Service:
         return result
 
     def sites(self):
-        return [dict(site, protocols=site.get("protocols", ["http", "websocket"])) for site in self.store.get("sites", [])]
+        cfg = self.settings()
+        return [dict(site, protocols=site.get("protocols", ["http", "websocket"]),
+                     zone_id=site.get("zone_id") or (cfg["zone_id"] if cfg["zone_name"] and site["hostname"].endswith("." + cfg["zone_name"]) else ""))
+                for site in self.store.get("sites", [])]
+
+    def site_zone(self, site):
+        zones = self.settings()["zones"]
+        # Exact label boundary and most specific zone prevent overlapping-zone ambiguity.
+        matches = [z for z in zones if site["hostname"].endswith("." + z["zone_name"])]
+        selected = next((z for z in matches if z["zone_id"] == site.get("zone_id")), None) if site.get("zone_id") else max(matches, key=lambda z: len(z["zone_name"]), default=None)
+        if not selected:
+            raise ValueError("公网域名必须属于已接入的域名；请在账户与配置中添加域名")
+        return selected
+
+    def add_zone(self, data):
+        selected = Zone(**data).model_dump()
+        with self.lock:
+            cfg = self.settings()
+            if not cfg["account_id"]:
+                raise ValueError("请先配置 Cloudflare 账户")
+            self.cf.zone(selected)
+            existing = next((z for z in cfg["zones"] if z["zone_id"] == selected["zone_id"] or z["zone_name"] == selected["zone_name"]), None)
+            if existing and existing != selected:
+                raise ValueError("域名或 Zone ID 与已有配置冲突")
+            if not existing:
+                if len(cfg["zones"]) >= 100:
+                    raise ValueError("最多接入 100 个域名")
+                cfg["zones"].append(selected)
+                if not cfg["zone_id"]:
+                    cfg.update(selected)
+                cfg = Settings(**cfg).model_dump()
+                self.store.set("settings", cfg)
+                self.store.audit("zone_added", selected)
+            return cfg
+
+    def remove_zone(self, zone_id):
+        with self.lock:
+            cfg = self.settings()
+            selected = next((z for z in cfg["zones"] if z["zone_id"] == zone_id), None)
+            if not selected:
+                raise ValueError("域名不存在")
+            if any(self.site_zone(s)["zone_id"] == zone_id for s in self.sites()) or any(host.endswith("." + selected["zone_name"]) for host in self.store.get("published_hosts", [])):
+                raise ValueError("域名仍被网站或已发布路由使用，不能移除")
+            if zone_id == cfg["zone_id"]:
+                raise ValueError("默认域名用于隧道与凭据绑定，不能直接移除")
+            cfg["zones"] = [z for z in cfg["zones"] if z["zone_id"] != zone_id]
+            self.store.set("settings", cfg)
+            self.store.audit("zone_removed", selected)
+            return cfg
 
     def cloudflare_setup(self):
         cfg = self.settings()
@@ -462,20 +651,30 @@ class Service:
 
     def validate_site(self, site):
         cfg = self.settings()
-        if not cfg["zone_name"] or not site["hostname"].endswith("." + cfg["zone_name"]):
-            raise ValueError("公网域名必须是所配置 Zone 的子域名")
+        self.site_zone(site)
         pinned_origin(site, cfg)
         if site["passcode_required"] and not self.store.secret("passcode_" + site["id"]):
             raise ValueError("请设置至少 12 位的网站访问口令")
 
-    def save_site(self, body, *, synchronize_verification=False):
+    def save_site(self, body, *, synchronize_verification=False, auto_publish=False):
         with self.lock:
             # Editing existing policies must remain possible even if credentials are unavailable.
             if not body.get("id"):
                 setup = self.cloudflare_setup()
                 if not setup["ready"]:
                     raise ValueError("Cloudflare 尚未配置完整，请先到“账户与配置”填写并保存：" + "、".join(setup["missing"]))
+            body = dict(body)
+            existing = next((s for s in self.sites() if s["id"] == body.get("id")), None)
+            body.setdefault("target", (existing or {}).get("target", "website"))
+            body.setdefault("zone_id", (existing or {}).get("zone_id", ""))
+            if body["target"] == "lanbridge":
+                body["origin"] = f'http://127.0.0.1:{self.settings()["admin_port"]}'
+                body["protocols"] = ["http"]
+                if not self.store.get("admin"):
+                    raise ValueError("请先创建本机管理员，再开启远程管理")
             passcode = body.pop("passcode", "")
+            if not isinstance(passcode, str):
+                raise ValueError("网站访问口令格式无效")
             site = Site(**body).model_dump()
             current = self.sites()
             old = next((s for s in current if s["id"] == site["id"]), None)
@@ -496,8 +695,7 @@ class Service:
                 hashed = self.store.secret("passcode_" + site["id"])
             # Validate before changing either policy or secret.
             cfg = self.settings()
-            if not cfg["zone_name"] or not site["hostname"].endswith("." + cfg["zone_name"]):
-                raise ValueError("域名必须为配置 Zone 下的子域名")
+            site["zone_id"] = self.site_zone(site)["zone_id"]
             pinned_origin(site, cfg)
             if site["passcode_required"] and not hashed:
                 raise ValueError("需要设置网站口令")
@@ -507,11 +705,23 @@ class Service:
                     self.cf.create_widget(sites=proposed)
                 except (ValueError, RuntimeError, OSError) as exc:
                     raise ValueError("人类验证配置未完成，网站修改未保存：" + str(exc)) from None
-            if passcode:
-                self.store.set_secret("passcode_" + site["id"], hashed)
             site["policy_version"] = secrets.token_hex(8)
-            self.store.set("sites", proposed)
+            self.store.set_many({"sites": proposed}, secret_values={"passcode_" + site["id"]: hashed} if passcode else None)
             self.store.audit("site_saved", {"id": site["id"], "hostname": site["hostname"], "enabled": site["enabled"]})
+            if auto_publish:
+                desired = sorted(s["hostname"] for s in proposed if s["enabled"])
+                published = sorted(self.store.get("published_hosts", []))
+                if desired != published or self.store.get("publication_error"):
+                    try:
+                        preview = self.cf.plan()
+                        self.cf.apply(preview["revision"])
+                        return site | {"publication": {"status": "published"}}
+                    except (ValueError, RuntimeError, OSError) as exc:
+                        message = str(exc)
+                        self.store.set("publication_error", message)
+                        self.store.audit("publish_incomplete", {"site_id": site["id"], "automatic": True, "reconcile_required": True})
+                        return site | {"publication": {"status": "failed", "message": message}}
+                return site | {"publication": {"status": "unchanged"}}
             return site
 
     def set_site_paused(self, site_id, paused):

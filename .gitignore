@@ -4,3 +4,11 @@ __pycache__/
 .pytest_cache/
 *.log
 bin/
+.test-artifacts/
+node_modules/
+
+# Local release archives and environment secrets
+*.zip
+.env
+.env.*
+!.env.example

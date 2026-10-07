@@ -56,11 +56,13 @@ class TokenManager:
         zone = [group(["DNS Read"] if target == "read" else ["DNS Write", "DNS Edit"], zone_scope), group(["Zone Read"], zone_scope)]
         return [
             {"effect": "allow", "permission_groups": account, "resources": {account_scope + "." + cfg["account_id"]: "*"}},
-            {"effect": "allow", "permission_groups": zone, "resources": {zone_scope + "." + cfg["zone_id"]: "*"}},
+            {"effect": "allow", "permission_groups": zone, "resources": {zone_scope + "." + z["zone_id"]: "*" for z in cfg.get("zones") or [{"zone_id": cfg["zone_id"]}]}},
         ]
 
     def provision(self, authority="", remember=False, human_check=True, target="write", repair_existing=False, force_new=False):
         with self.service.lock:
+            if not isinstance(authority, str) or not isinstance(remember, bool) or not isinstance(human_check, bool):
+                raise ValueError("授权令牌或保存、人类验证选项无效")
             if target not in ("write", "read") or not isinstance(repair_existing, bool) or not isinstance(force_new, bool) or (force_new and repair_existing):
                 raise ValueError("令牌类型或修复选项无效")
             store = self.service.store
