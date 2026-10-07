@@ -478,6 +478,9 @@ class Connector:
         with self.lock:
             if self.status()["running"]:
                 return self.status()
+            runtime = getattr(self.service, "gateway_runtime", None)
+            if runtime and not runtime.status()["running"]:
+                raise ValueError("转发网关未启动，请先在本机与安全中恢复网关")
             cfg = self.service.settings()
             if not self.service.store.secret("tunnel_token"):
                 raise ValueError("请先创建 Tunnel 并保存连接令牌")

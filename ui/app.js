@@ -340,8 +340,14 @@ $('#temporary-login-form').onsubmit=async e=>{
 function renderGatewayPort(){
   const form=$('#gateway-port-form');if(!form||!state)return;
   const pending=state.pending_gateway_port;
+  const gateway=state.gateway;
+  const unavailable=gateway&&gateway.running===false;
+  $('#gateway-runtime-status').hidden=!unavailable;
+  $('#gateway-runtime-status').textContent=unavailable?gateway.error+' 转发暂不可用，管理台可正常使用。':'';
+  $('#gateway-retry').hidden=!unavailable;
+  $('#gateway-port-note').textContent=unavailable?'修改端口并保存可立即重试启动；恢复后到网站转发同步云端路由。':'下次启动时生效。重启后到网站转发同步云端路由。';
   $('#gateway-port-current').textContent=state.settings.gateway_port+(pending?' · 下次启动使用：'+pending:'');
-  if(!form.dataset.dirty)form.elements.port.value=pending||state.settings.gateway_port;
+  if(!form.dataset.dirty)form.elements.port.value=pending||(unavailable?gateway.port:null)||state.settings.gateway_port;
 }
 function renderPublicClientSetting(){
   if(typeof state?.public_client_enabled==='boolean')publicClientEnabled=state.public_client_enabled;
@@ -370,10 +376,11 @@ function setLocalSecurity(selection){
 }
 document.querySelectorAll('[data-local-setting]').forEach(button=>button.onclick=()=>setLocalSecurity(button.dataset.localSetting===localSecuritySelection?'':button.dataset.localSetting));
 $('#local-security-close').onclick=()=>setLocalSecurity('');
+$('#gateway-retry').onclick=async e=>{const button=e.currentTarget,session=csrf;button.disabled=true;let saved=false;try{await api('gateway-retry',{});saved=true;if(session!==csrf)return;await loadState();if(session===csrf)$('#gateway-port-feedback').textContent='转发网关已启动。';}catch(err){if(session===csrf)$('#gateway-port-feedback').textContent=saved?'网关已启动，但页面刷新失败，请手动刷新。':err.message;}finally{button.disabled=false;}};
 $('#gateway-port-form').oninput=e=>{e.currentTarget.dataset.dirty='true';};
 $('#gateway-port-form').onsubmit=async e=>{
   e.preventDefault();const form=e.currentTarget;
-  await saveLocalSetting(form,$('#gateway-port-feedback'),'gateway-port',{port:Number(form.elements.port.value)},result=>result.restart_required?'已保存。重新启动 LanBridge 后生效，再到网站转发同步云端路由。':'已取消待生效的端口修改，继续使用当前端口。');
+  await saveLocalSetting(form,$('#gateway-port-feedback'),'gateway-port',{port:Number(form.elements.port.value)},result=>result.recovered?'网关已启动。请到网站转发同步云端路由。':result.restart_required?'已保存。重新启动 LanBridge 后生效，再到网站转发同步云端路由。':'已取消待生效的端口修改，继续使用当前端口。');
 };
 function overviewSites(current){
  if(!current.sites.length)return '<div class="overview-empty">暂无网站。完成接入后，可添加要转发的局域网网页。</div>';
@@ -387,7 +394,7 @@ function overviewSites(current){
  }).join('');
  return '<div class="overview-site-list">'+rows+'</div>'+(current.sites.length>6?'<p class="overview-list-note small muted">显示 6 个网站，共 '+current.sites.length+' 个；待处理和已暂停的网站优先。</p>':'');
 }
-function render(){if(!state)return;renderPublicClientSetting();renderAgentGuide();renderPublicationHint();renderSetup();renderPermissionIssues();renderTokenManager();renderConnectorReadiness();renderNavigationIssues();renderActionAvailability();renderConnectorMaintenance();const sites=state.sites,cfg=state.settings,conn=state.connector;$('#nav-count').textContent=sites.length;$('#stat-sites').textContent=sites.length;$('#stat-enabled').textContent=sites.filter(s=>s.enabled&&!s.paused).length;$('#stat-paused').textContent=sites.filter(s=>s.enabled&&s.paused).length;renderCloudConnection();$('#flow-status').textContent=conn.running?'运行中':conn.last_exit!=null&&conn.last_exit!==0?'异常退出':'未启动';$('#overview-connector-detail').hidden=false;$('#overview-connector-detail').textContent=conn.running?'本机网关：127.0.0.1:'+cfg.gateway_port:conn.installed?'可在网站转发中启动连接器。':'尚未安装 Cloudflared。';$('#flow-status').className='badge '+(conn.running?'success':'neutral');$('#overview-sites').innerHTML=overviewSites(state);$('#sites-table').innerHTML=pauseNotice(sites)+table(sites);$('#connector-status').textContent=conn.running?'运行中':conn.last_exit!=null&&conn.last_exit!==0?'异常退出（'+conn.last_exit+'）':'已停止';$('#connector-status').className='badge '+(conn.running?'success':'neutral');$('#connector-path').textContent=cfg.cloudflared_path||(conn.installed?'已从 PATH 找到':'尚未找到 cloudflared.exe');$('#tunnel-id').textContent=cfg.tunnel_id||'尚未创建';$('#gateway-address').textContent='127.0.0.1:'+cfg.gateway_port;renderHumanVerification(state);if(!$('#verification-credentials-form').dataset.dirty)$('#verification-credentials-form [name=turnstile_sitekey]').value=cfg.turnstile_sitekey||'';renderAudit();$('#read-token-status').textContent=state.credentials.cf_read_token?'已保存':'未配置';$('#read-token-remove').hidden=!state.credentials.cf_read_token;$('#secret-status').textContent=state.credentials.turnstile_secret?'已保存':'未配置';if(currentView==='settings'&&!$('#settings-form').dataset.dirty)fillSettings();renderTemporaryAccess();}
+function render(){if(!state)return;renderPublicClientSetting();renderAgentGuide();renderPublicationHint();renderSetup();renderPermissionIssues();renderTokenManager();renderConnectorReadiness();renderNavigationIssues();renderActionAvailability();renderConnectorMaintenance();const sites=state.sites,cfg=state.settings,conn=state.connector;$('#nav-count').textContent=sites.length;$('#stat-sites').textContent=sites.length;$('#stat-enabled').textContent=sites.filter(s=>s.enabled&&!s.paused).length;$('#stat-paused').textContent=sites.filter(s=>s.enabled&&s.paused).length;renderCloudConnection();$('#flow-status').textContent=conn.running?'运行中':conn.last_exit!=null&&conn.last_exit!==0?'异常退出':'未启动';$('#overview-connector-detail').hidden=false;$('#overview-connector-detail').textContent=state.gateway&&state.gateway.running===false?state.gateway.error+' 请在账户与配置 → 本机与安全中恢复网关。':conn.running?'本机网关：127.0.0.1:'+cfg.gateway_port:conn.installed?'可在网站转发中启动连接器。':'尚未安装 Cloudflared。';$('#flow-status').className='badge '+(conn.running?'success':'neutral');$('#overview-sites').innerHTML=overviewSites(state);$('#sites-table').innerHTML=pauseNotice(sites)+table(sites);$('#connector-status').textContent=conn.running?'运行中':conn.last_exit!=null&&conn.last_exit!==0?'异常退出（'+conn.last_exit+'）':'已停止';$('#connector-status').className='badge '+(conn.running?'success':'neutral');$('#connector-path').textContent=cfg.cloudflared_path||(conn.installed?'已从 PATH 找到':'尚未找到 cloudflared.exe');$('#tunnel-id').textContent=cfg.tunnel_id||'尚未创建';$('#gateway-address').textContent='127.0.0.1:'+cfg.gateway_port;renderHumanVerification(state);if(!$('#verification-credentials-form').dataset.dirty)$('#verification-credentials-form [name=turnstile_sitekey]').value=cfg.turnstile_sitekey||'';renderAudit();$('#read-token-status').textContent=state.credentials.cf_read_token?'已保存':'未配置';$('#read-token-remove').hidden=!state.credentials.cf_read_token;$('#secret-status').textContent=state.credentials.turnstile_secret?'已保存':'未配置';if(currentView==='settings'&&!$('#settings-form').dataset.dirty)fillSettings();renderTemporaryAccess();}
 function fillSettings(){const form=$('#settings-form');for(const el of form.elements)if(el.name)el.value=state.settings[el.name]??'';form.dataset.dirty='';renderConnectorMaintenance();}
 const setupFields = [
   {key:'account_id', label:'Account ID', selector:'#settings-form [name=account_id]', help:'填写 Cloudflare 账户 ID，并点击保存配置。'},
@@ -1017,7 +1024,7 @@ function renderActionAvailability(){
   const rules={
     'create-tunnel':[cfg.tunnel_id?!credentials.tunnel_token:ready,cfg.tunnel_id&&credentials.tunnel_token?'隧道和连接令牌已配置':'请先完成 Cloudflare 账户接入'],
     'tunnel-token-refresh':[!!cfg.tunnel_id&&!!cfg.account_id&&!!credentials.cf_write_token,'请先创建隧道并配置 API Token'],
-    'connector-start':[!!cfg.tunnel_id&&credentials.tunnel_token&&!conn.running,'请先创建 Tunnel 并获取连接令牌；已运行时无需重复启动'],
+    'connector-start':[!!cfg.tunnel_id&&credentials.tunnel_token&&!conn.running&&state.gateway?.running!==false,'请先创建 Tunnel 并获取连接令牌；已运行时无需重复启动'],
     'connector-stop':[conn.running,'连接器当前未运行'],
     'cf-check':[!!cfg.tunnel_id&&(credentials.cf_read_token||credentials.cf_write_token),'请先创建 Tunnel 并配置 API Token'],
     'overview-cf-check':[!!cfg.tunnel_id&&(credentials.cf_read_token||credentials.cf_write_token),'请先完成 Cloudflare 接入并创建隧道'],

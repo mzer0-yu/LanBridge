@@ -8,8 +8,8 @@
 
 ## 最近验证
 
-- 完整 Python：288 项通过；仅既有 Starlette/TestClient 弃用警告。
-- Node：61 项通过；统一浏览器入口：12 组通过。
+- 完整 Python：287 项通过；仅既有 Starlette/TestClient 弃用警告。
+- Node：61 项通过；统一浏览器入口：13 组通过。
 - 六个管理页面、登录及关闭提示页；桌面/手机排版、交互反馈、权限、HTML 转义和表单字体。布局覆盖 390/760/900/1440px，长名称和长地址补查 320/760/1440px。
 - 本机运行服务提供当前前端文件；管理页、转发列表、脚本、样式及 bootstrap 可读。差异格式检查通过。
 - 最新截图在 `.test-artifacts/ui/`，测试文件在 `tests/`。复现命令见根目录 [AGENTS.md](../AGENTS.md) 和 [浏览器检查说明](../tests/ui/README.md)。

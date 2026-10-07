@@ -14,6 +14,7 @@ const checks = [
   'public-client-check.js',
   'client-disabled-check.js',
   'content-layout-check.js',
+  'gateway-recovery-check.js',
 ];
 for (const name of checks) {
   const result = spawnSync(process.execPath, [path.join(__dirname, name)], {stdio:'inherit'});

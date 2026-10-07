@@ -11,6 +11,8 @@ if ($NoDialog) {
     & $python run.py serve --open-browser
     exit $LASTEXITCODE
 }
+& $python run.py open-existing
+if ($LASTEXITCODE -eq 0) { exit 0 }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()

@@ -48,7 +48,7 @@ def test_remote_admin_and_client_authentication_and_csrf(service):
 def test_local_operations_never_open_through_remote_admin(service):
     remote_site(service)
     with remote_client(service) as client:
-        for path in ["/api/setup", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/approve", "/api/cloudflare/browser-authorize", "/api/cloudflare/browser-authorize-restart", "/api/shutdown"]:
+        for path in ["/api/setup", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/approve", "/api/cloudflare/browser-authorize", "/api/cloudflare/browser-authorize-restart", "/api/shutdown", "/api/gateway-port", "/api/gateway-retry"]:
             assert client.post(path, json={}).status_code == 403
         assert client.get("/api/local-login/browsers").status_code == 403
         assert client.get("/api/state", headers={"Host": "127.0.0.1:8890"}).status_code == 404

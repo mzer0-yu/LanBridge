@@ -7,7 +7,6 @@ from pathlib import Path
 import socket
 import sys
 import threading
-from urllib.parse import urlsplit
 
 from lanbridge.service import Service
 from lanbridge.models import Settings
@@ -21,7 +20,7 @@ def acquire_runtime(root):
     handle.seek(0)
     if os.name == "nt":
         import msvcrt
-        if handle.read(1) == b"":
+        if os.fstat(handle.fileno()).st_size == 0:
             handle.write(b"0")
             handle.flush()
         handle.seek(0)
@@ -40,73 +39,40 @@ def acquire_runtime(root):
     return handle
 
 
-def startup_settings(service, admin_port=None, gateway_port=None):
-    cfg = service.settings()
-    pending = service.store.get("pending_gateway_port")
-    cfg = Settings(**(cfg | {
-        "admin_port": admin_port if admin_port is not None else cfg["admin_port"],
-        "gateway_port": gateway_port if gateway_port is not None else pending or cfg["gateway_port"],
-    })).model_dump()
-    for site in service.sites():
-        if site.get("target") != "lanbridge":
-            origin = urlsplit(site["origin"])
-            port = origin.port or (443 if origin.scheme == "https" else 80)
-            if port in (cfg["admin_port"], cfg["gateway_port"]):
-                raise ValueError("所选端口与网站源站端口相同，请选择其他端口，避免转发循环。")
-    return cfg
-
-
 def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=None, gateway_port=None):
+    import secrets
     import uvicorn
     from lanbridge.admin import create_admin
-    from lanbridge.gateway import create_gateway
+    from lanbridge.gateway_runtime import GatewayRuntime
     from lanbridge.gateway_log import configure_runtime_logging
-    cfg = startup_settings(service, admin_port, gateway_port)
+    # Only the admin listener is required to enter the recovery interface.
+    cfg = Settings(**(service.settings() | ({"admin_port": admin_port} if admin_port is not None else {}))).model_dump()
     runtime_log = configure_runtime_logging(service.store.root)
-    pending_port = service.store.get("pending_gateway_port") if gateway_port is None else None
-    sockets = []
+    listener = socket.socket()
+    if os.name == "nt":
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    gateway = GatewayRuntime(service)
+    service.gateway_runtime = gateway
+    info_path = service.store.root / "runtime.json"
     try:
-        for port in (cfg["admin_port"], cfg["gateway_port"]):
-            sock = socket.socket()
-            if os.name == "nt":
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            try:
-                sock.bind(("127.0.0.1", port))
-            except OSError:
-                if not pending_port or port != pending_port:
-                    sock.close()
-                    role = "管理台" if port == cfg["admin_port"] else "转发网关"
-                    raise ValueError(f"{role}端口 {port} 无法绑定（被占用或系统保留），请在启动器中修改端口后重试。") from None
-                cfg = startup_settings(service, admin_port, service.settings()["gateway_port"])
-                pending_port = None
-                try:
-                    sock.bind(("127.0.0.1", cfg["gateway_port"]))
-                except OSError:
-                    sock.close()
-                    raise ValueError(f'转发网关端口 {cfg["gateway_port"]} 无法绑定，请在启动器中修改端口后重试。') from None
-                print("待启用网关端口被占用，继续使用原端口；请在管理台选择其他端口。", flush=True)
-            sock.listen(128)
-            sockets.append(sock)
+        try:
+            listener.bind(("127.0.0.1", cfg["admin_port"]))
+            listener.listen(128)
+        except OSError:
+            raise ValueError(f'管理台端口 {cfg["admin_port"]} 无法绑定，请在启动器中修改端口后重试。') from None
         previous = service.settings()
-        if cfg != previous or gateway_port is not None or pending_port:
-            values = {"settings": cfg, "pending_gateway_port": None}
-            if cfg["admin_port"] != previous["admin_port"]:
-                values["sites"] = [
-                    dict(site, origin=f'http://127.0.0.1:{cfg["admin_port"]}')
-                    if site.get("target") == "lanbridge" else site
-                    for site in service.store.get("sites", [])
-                ]
-            gateway_changed = cfg["gateway_port"] != previous["gateway_port"]
-            if gateway_changed and not service.store.get("previous_gateway_port"):
-                values["previous_gateway_port"] = previous["gateway_port"]
-            if gateway_changed and cfg["tunnel_id"]:
-                values["publication_error"] = "本机网关端口已修改，请在网站转发中点击重试发布，同步云端路由"
+        if cfg != previous:
+            values = {"settings": cfg, "sites": [dict(site, origin=f'http://127.0.0.1:{cfg["admin_port"]}') if site.get("target") == "lanbridge" else site for site in service.store.get("sites", [])]}
             service.store.set_many(values)
-        gateway = uvicorn.Server(uvicorn.Config(create_gateway(service), host="127.0.0.1", port=cfg["gateway_port"], limit_concurrency=192, ws_max_size=8 * 1024 * 1024, ws_max_queue=2, h11_max_incomplete_event_size=16384, proxy_headers=False, access_log=False, log_config=None, timeout_graceful_shutdown=8, log_level="warning"))
-        thread = threading.Thread(target=lambda: gateway.run(sockets=[sockets[1]]), daemon=True)
-        thread.start()
-        print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}/admin  |  网关：127.0.0.1:{cfg["gateway_port"]}', flush=True)
-        print("Cloudflare 连接器需在管理台手动启动；点击“退出 LanBridge”或按 Ctrl+C 停止本平台及其连接器。", flush=True)
+        result = gateway.start(gateway_port)
+        if result["error"]:
+            print(result["error"] + " 管理台仍可使用。", flush=True)
+        service.runtime_id = secrets.token_hex(16)
+        info = {"instance": service.runtime_id, "admin_port": cfg["admin_port"]}
+        temporary = info_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(info), encoding="utf-8")
+        temporary.replace(info_path)
+        print(f'管理台：http://127.0.0.1:{cfg["admin_port"]}/admin', flush=True)
         admin = None
         def shutdown():
             admin.should_exit = True
@@ -119,21 +85,49 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
                 import webbrowser
                 while not admin.started and not admin.should_exit:
                     time.sleep(0.1)
-                if admin.started and not admin.should_exit:
+                if admin.started:
                     webbrowser.open(f'http://127.0.0.1:{cfg["admin_port"]}/admin')
             threading.Thread(target=show_browser, daemon=True).start()
-        try:
-            admin.run(sockets=[sockets[0]])
-        finally:
-            if hasattr(service, "browser_auth"):
-                service.browser_auth.stop()
-            service.connector.stop()
-            gateway.should_exit = True
-            thread.join(timeout=10)
+        admin.run(sockets=[listener])
     finally:
-        for sock in sockets:
-            sock.close()
+        gateway.stop()
+        if hasattr(service, "browser_auth"):
+            service.browser_auth.stop()
+        service.connector.stop()
+        listener.close()
+        info_path.unlink(missing_ok=True)
         runtime_log.close()
+
+
+def open_existing(root, open_browser=True):
+    """Confirm our runtime lock and instance marker, never just an occupied port."""
+    import httpx
+    import webbrowser
+    if not root.exists():
+        return False
+    try:
+        lock = acquire_runtime(root)
+    except ValueError:
+        try:
+            info = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
+            port = info["admin_port"]
+            if not isinstance(info.get("instance"), str) or len(info["instance"]) != 32:
+                return False
+            if type(port) is not int or not 1024 <= port <= 65535:
+                return False
+            with httpx.Client(trust_env=False, timeout=2, follow_redirects=False) as client:
+                response = client.get(f"http://127.0.0.1:{port}/api/bootstrap")
+                payload = response.json()
+                if response.status_code != 200 or not isinstance(payload, dict) or payload.get("instance") != info["instance"]:
+                    return False
+            if open_browser:
+                webbrowser.open(f"http://127.0.0.1:{port}/admin")
+            return True
+        except (OSError, ValueError, KeyError, TypeError, httpx.HTTPError):
+            return False
+    else:
+        lock.close()
+        return False
 
 
 def main():
@@ -147,6 +141,7 @@ def main():
     server.add_argument("--gateway-port", type=int, help="启动前选择转发网关端口（1024–65535），成功绑定后保存")
     server.add_argument("--authorize-cloudflare", action="store_true", help="启动后打开官方浏览器授权，自动配置启用人类验证的网站")
     sub.add_parser("status")
+    sub.add_parser("open-existing")
     sub.add_parser("setup-admin")
     credential = sub.add_parser("configure-secret")
     credential.add_argument("name", choices=["cf_read_token", "cf_write_token", "turnstile_secret"])
@@ -175,6 +170,11 @@ def main():
     args = parser.parse_args()
     if args.command == "capabilities":
         print(json.dumps({"schema": "lanbridge-capabilities/v1", "commands": list(sub.choices), "interfaces": ["cli", "api", "mcp", "skill"], "shared_business_core": True, "admin_loopback_only": True, "preview_required": True, "secrets_in_arguments": False}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "open-existing":
+        return 0 if open_existing(args.data_dir.resolve()) else 1
+    if args.command == "serve" and open_existing(args.data_dir.resolve(), args.open_browser):
+        print("LanBridge 已运行，继续使用现有管理台。")
         return 0
     try:
         service = Service(args.data_dir.resolve())

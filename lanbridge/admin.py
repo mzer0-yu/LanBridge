@@ -42,7 +42,7 @@ def create_admin(service, shutdown=None, *, remote=False):
                 return JSONResponse({"detail": "远程管理入口不可用"}, 403)
             if not service.store.get("admin"):
                 return JSONResponse({"detail": "请先在本机创建管理员"}, 503)
-            if request.url.path in {"/api/setup", "/api/shutdown", "/api/password"} or request.url.path.startswith("/api/local-login/") or request.url.path.startswith("/api/cloudflare/browser-authorize"):
+            if request.url.path in {"/api/setup", "/api/shutdown", "/api/password", "/api/gateway-port", "/api/gateway-retry"} or request.url.path.startswith("/api/local-login/") or request.url.path.startswith("/api/cloudflare/browser-authorize"):
                 return JSONResponse({"detail": "此操作仅支持本机访问"}, 403)
             if not service.store.get("public_client_enabled", True) and request.url.path in PUBLIC_CLIENT_PATHS:
                 return disabled_client_response(request.url.path)
@@ -170,6 +170,7 @@ def create_admin(service, shutdown=None, *, remote=False):
     @app.get("/api/bootstrap")
     def bootstrap(request: Request):
         return {"initialized": bool(service.store.get("admin")), "authenticated": bool(request.state.session),
+                "instance": getattr(service, "runtime_id", None) if not remote else None,
                 "csrf": request.state.session["csrf"] if request.state.session else "", "remote": remote,
                 "public_client_enabled": service.store.get("public_client_enabled", True),
                 "scope": request.state.session.get("scope", "admin") if request.state.session else None,
@@ -352,6 +353,8 @@ def create_admin(service, shutdown=None, *, remote=False):
                 "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token") or service.store.get("pending_browser_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
                 "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
         result["public_client_enabled"] = service.store.get("public_client_enabled", True)
+        runtime = getattr(service, "gateway_runtime", None)
+        result["gateway"] = runtime.status() if runtime else None
         result["access_scope"] = request.state.session.get("scope", "admin")
         result["access_permissions"] = request.state.session.get("permissions", [])
         result["access_expires"] = request.state.session.get("expires")
@@ -372,7 +375,26 @@ def create_admin(service, shutdown=None, *, remote=False):
         if remote:
             raise ValueError("网关端口请在本机管理台修改")
         data = await body(request)
-        return await asyncio.to_thread(service.queue_gateway_port, data.get("port"))
+        result = await asyncio.to_thread(service.queue_gateway_port, data.get("port"))
+        runtime = getattr(service, "gateway_runtime", None)
+        if runtime and not runtime.status()["running"]:
+            status = await asyncio.to_thread(runtime.start, data.get("port"))
+            if not status["running"]:
+                raise ValueError(status["error"])
+            result.update(restart_required=False, recovered=True, gateway=status)
+        return result
+
+    @app.post("/api/gateway-retry")
+    async def gateway_retry(request: Request):
+        if remote:
+            raise ValueError("转发网关请在本机管理台启动")
+        runtime = getattr(service, "gateway_runtime", None)
+        if not runtime:
+            raise ValueError("当前实例不支持网关恢复，请重新启动 LanBridge")
+        status = await asyncio.to_thread(runtime.start)
+        if not status["running"]:
+            raise ValueError(status["error"])
+        return status
 
     @app.get("/api/audit/export")
     def audit_export():
