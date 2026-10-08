@@ -6,7 +6,7 @@ LanBridge 是面向 Windows 的自托管 Cloudflare Tunnel 管理工具。把 NA
 
 **当前代码版本：1.1.0-dev（开发版）** · [开发版说明](docs/development.md) · [使用指南](docs/user-guide.md) · [反馈问题](https://github.com/mzer0-yu/LanBridge/issues)
 
-`main` 分支为开发版，包含最新功能与修复，尚未作为正式 Release 发布。已有正式版本仍为 [v1.0.0](https://github.com/mzer0-yu/LanBridge/releases/tag/v1.0.0)，其下载包不包含当前全部开发改动。
+`dev` 分支为最新开发版，包含最新功能与修复，尚未作为正式 Release 发布。已有正式版本仍为 [v1.0.0](https://github.com/mzer0-yu/LanBridge/releases/tag/v1.0.0)，其下载包不包含当前全部开发改动。
 
 > 采用 [MIT 许可证](LICENSE)，欢迎使用、修改、分享和参与开发。本项目不是 Cloudflare 官方产品。
 

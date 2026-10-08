@@ -1,6 +1,6 @@
 # LanBridge 1.1.0-dev
 
-当前 `main` 分支为开发版，版本号见根目录 `VERSION`。此版本同步源码，不创建 GitHub Release，不覆盖已有 v1.0.0 标签或下载包。
+当前 `dev` 分支为最新开发版，版本号见根目录 `VERSION`。此版本同步源码，不创建 GitHub Release，不覆盖已有 v1.0.0 标签或下载包。
 
 ## 本轮开发内容
 
