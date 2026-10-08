@@ -14,8 +14,9 @@ for(const width of [1440,760,390,320])for(const remote of [false,true]){
   return r.fulfill({json:data});
  });
  await page.goto('http://lb.preview/admin');await page.locator('#shell').waitFor();await page.locator('[data-view="settings"]').click();
- if(remote){assert(await page.locator('#connector-auto-start-form input').isDisabled());assert(await page.locator('#connector-auto-start-form button').isDisabled());assert(await page.locator('[data-local-setting="admin"]').isDisabled());assert(await page.locator('#restart').isDisabled());}
+ if(remote){assert(await page.locator('#sidebar-restart').isHidden());assert(await page.locator('#connector-auto-start-form input').isDisabled());assert(await page.locator('#connector-auto-start-form button').isDisabled());assert(await page.locator('[data-local-setting="admin"]').isDisabled());assert.equal(await page.locator('#restart').count(),0);}
  else{
+  if(width>760){await page.locator('#sidebar-restart').click();await page.locator('#restart-dialog').waitFor();await page.locator('#restart-dialog').evaluate(dialog=>dialog.close());assert.equal(restarts,0);}
   const autoInput=page.locator('#connector-auto-start-form input');
   assert(await autoInput.isChecked());await autoInput.uncheck();await page.locator('#refresh').click();assert(!(await autoInput.isChecked()));
   await page.locator('#connector-auto-start-form button').click();await page.waitForFunction(()=>document.querySelector('#connector-auto-start-form button').textContent==='已保存');
@@ -23,7 +24,7 @@ for(const width of [1440,760,390,320])for(const remote of [false,true]){
   await page.reload();await page.locator('[data-view="settings"]').click();assert(!(await autoInput.isChecked()));
   const positions=()=>page.locator('.local-security-panel').evaluate(panel=>{
    const origin=panel.getBoundingClientRect();
-   return ['.local-security-heading h2','#restart','.local-security-switch'].map(selector=>{
+   return ['.local-security-heading h2','.local-security-switch'].map(selector=>{
     const r=panel.querySelector(selector).getBoundingClientRect();return {x:r.x-origin.x,y:r.y-origin.y,width:r.width,height:r.height};
    });
   });
@@ -47,13 +48,13 @@ for(const width of [1440,760,390,320])for(const remote of [false,true]){
   assert((await page.locator('#admin-port-current').textContent()).includes('9900'));
   await page.locator('.local-security-panel').screenshot({path:path.resolve(__dirname,'../../.test-artifacts/ui/local-security-expanded-')+width+'.png'});
   assert.equal(pending,9900);assert.equal(require('./fixture').state.settings.admin_port,8890);
-  await page.locator('#restart').click();assert((await page.locator('#restart-address').textContent()).includes('9900'));
+  await page.locator('#sidebar-restart').click();assert((await page.locator('#restart-address').textContent()).includes('9900'));
   await page.locator('#confirm-restart').click();await page.locator('#restart-error').filter({hasText:'占用'}).waitFor();assert(await page.locator('#confirm-restart').isEnabled());
   await page.locator('#cancel-restart').click();
  }
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.deepEqual(errors,[]);
  await page.screenshot({path:path.resolve(__dirname,'../../.test-artifacts/ui/admin-ports-')+width+(remote?'-remote':'')+'.png'});
- if(!remote){fail=false;await page.locator('#restart').click();await page.locator('#confirm-restart').click();await page.locator('#platform-restarting').waitFor();assert.equal(restarts,2);if(width===390){oldRuntime=true;await page.reload();await page.locator('#shell').waitFor();await page.locator('[data-view="settings"]').click();assert(await page.locator('[data-local-setting="admin"]').isDisabled());assert(await page.locator('#restart').isDisabled());assert((await page.locator('#local-security-note').textContent()).includes('旧版本'));}}
+ if(!remote){fail=false;await page.locator('#sidebar-restart').click();await page.locator('#confirm-restart').click();await page.locator('#platform-restarting').waitFor();assert.equal(restarts,2);if(width===390){oldRuntime=true;await page.reload();await page.locator('#shell').waitFor();await page.locator('[data-view="settings"]').click();assert(await page.locator('[data-local-setting="admin"]').isDisabled());assert(await page.locator('#sidebar-restart').isDisabled());assert((await page.locator('#local-security-note').textContent()).includes('旧版本'));}}
  await page.close();
 }console.log('PASS: deferred admin port, restart confirmation/error/success, remote restriction, desktop/mobile layout');
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});

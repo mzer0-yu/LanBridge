@@ -16,7 +16,7 @@ for(const width of [390,1440]){
   {form:'password-form',name:'password',complete:'new-password'}]);
  assert.equal(await page.locator('#auth-form [name=username]').getAttribute('autocomplete'),'username');
  assert.deepEqual(await page.locator('form').evaluateAll(nodes=>nodes.filter(n=>!['auth-form','password-form'].includes(n.id)&&n.autocomplete!=='off').map(n=>n.id)),[]);
- const names=['token','cf_write_token','cf_read_token','authority','turnstile_secret','passcode'];
+ const names=['token','cf_write_token','cf_read_token','authority','turnstile_secret','passcode','access_key_id','access_key_secret','security_token'];
  assert.equal(await page.locator('textarea.secret-input').count(),names.length);
  for(const name of names){
   const field=page.locator(`textarea[name=${name}]`);

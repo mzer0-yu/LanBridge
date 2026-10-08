@@ -225,8 +225,12 @@ test('tunnel actions distinguish creation, recovery, retrieval and completed con
   assert.equal(nodes['#create-tunnel'].textContent,'创建隧道');assert.equal(nodes['#create-tunnel'].disabled,false);
   state.tunnel_pending=true;context.renderActionAvailability();assert.equal(nodes['#create-tunnel'].textContent,'核对并恢复隧道');
   state.settings.tunnel_id='existing';context.renderActionAvailability();assert.equal(nodes['#create-tunnel'].textContent,'获取隧道令牌 →');
+  assert.equal(nodes['#tunnel-maintenance'].open,true);assert.equal(nodes['#account-config-details'].open,true);
+  assert.equal(nodes['#tunnel-token-state'].textContent,'待配置');
   state.credentials.tunnel_token=true;context.renderActionAvailability();
   assert.equal(nodes['#tunnel-maintenance'].hidden,false);
+  assert.equal(nodes['#tunnel-maintenance'].open,false);
+  assert.equal(nodes['#tunnel-token-state'].textContent,'已配置，无需操作');
   assert.equal(nodes['#create-tunnel'].hidden,true);assert.equal(nodes['#create-tunnel'].disabled,true);
   assert.equal(nodes['#connector-start'].hidden,false);assert.equal(nodes['#connector-stop'].hidden,true);
   state.connector.running=true;context.renderActionAvailability();
@@ -243,21 +247,23 @@ test('running connector is not mislabeled as unconfigured when management creden
 
 test('browser shortcut opens settings and starts authorization; repair remains a separate action',async()=>{
   const calls=[],status={};
-  const context={go:view=>calls.push(view),$:selector=>selector==='#browser-authorize'?{scrollIntoView:()=>calls.push('scroll')}:status,action:async(button,endpoint,message,body)=>calls.push(endpoint)};
+  const context={csrf:'session',go:view=>calls.push(view),$:selector=>selector==='#browser-authorize'?{scrollIntoView:()=>calls.push('scroll')}:status,action:async(button,endpoint,message,body)=>calls.push(endpoint)};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('async function startBrowserAuthorization('),source.indexOf('let browserAuthPoll;')),context);
   await context.startBrowserAuthorization({dataset:{}});
   assert.deepEqual(calls,['settings','scroll','cloudflare/browser-authorize']);
   const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
   const alert=html.slice(html.indexOf('id="cloudflare-permission-alert"'),html.indexOf('id="state-refresh-warning"'));
-  assert(alert.includes('data-browser-authorize="true"'));
-  assert(alert.includes('修复当前令牌权限'));
-  assert(alert.includes('data-token-manager="true"'));
+  assert(alert.includes('id="permission-retry"'));
+  assert(!alert.includes('id="permission-authorize"'));
+  const account=html.slice(html.indexOf('id="account-permission-notice"'),html.indexOf('class="account-domain-heading"'));
+  assert(account.includes('id="permission-authorize"'));
+  assert(account.includes('id="permission-repair"'));
   assert(!alert.includes('手动编辑 Cloudflare'));
 });
 
 test('browser authorization launch failure stays visible next to its entry',async()=>{
-  const status={};const context={go(){},$:selector=>selector==='#browser-authorize'?{scrollIntoView(){}}:status,action:async()=>{throw Error('账户未配置');}};
+  const status={};const context={csrf:'session',go(){},$:selector=>selector==='#browser-authorize'?{scrollIntoView(){}}:status,action:async()=>{throw Error('账户未配置');}};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('async function startBrowserAuthorization('),source.indexOf('let browserAuthPoll;')),context);
   await context.startBrowserAuthorization({dataset:{}});
@@ -270,6 +276,12 @@ test('authorization progress shows the wait limit and expired callback recovery'
   assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:940,message:'授权中'}),/60 秒/);
   assert.match(context.browserAuthMessage({phase:'authorizing',updated_at:800,message:'授权中'}),/重新打开授权页或取消/);
   assert.equal(context.browserAuthMessage({phase:'error',message:'已超时'}),'已超时');
+  context.browserAuthInteraction=false;
+  assert.equal(context.browserAuthMessage({phase:'done',message:'旧成功提示'}),'');
+  assert.equal(context.browserAuthMessage({phase:'done',authorization_saved:true,message:'旧自动配置完成'}),'');
+  context.browserAuthInteraction=true;
+  assert.match(context.browserAuthMessage({phase:'done'}),/本次授权已完成/);
+  assert.equal(context.browserAuthMessage({phase:'done',authorization_saved:true,message:'本次自动配置完成'}),'本次自动配置完成');
 });
 
 test('browser connection has no mandatory authority-token fallback',()=>{
@@ -468,4 +480,121 @@ test('all read-only API requests have a deadline while writes keep their existin
   await context.api('audit/settings',{limit_mb:5});assert.equal(requests.at(-1).options.signal,undefined);
   context.fetch=async()=>{throw Object.assign(Error('timeout'),{name:'TimeoutError'});};
   await assert.rejects(context.api('temporary-tokens'),/读取超时/);
+});
+
+
+test('inline operation errors refresh state without duplicate global feedback',async()=>{
+  let notices=0;
+  const context=asyncHarness({api:async(path)=>{if(path==='state')return {failed:true};throw Error('授权续期失败');},toast:()=>notices++});
+  const button={dataset:{},disabled:false};
+  await assert.rejects(context.action(button,'cloudflare/zones',null,{},{inlineError:true}),/续期失败/);
+  assert.equal(notices,0);assert.equal(context.state.failed,true);assert.equal(button.disabled,false);
+  await assert.rejects(context.action(button,'cloudflare/zones',null,{}),/续期失败/);
+  assert.equal(notices,1);
+});
+
+
+test('permission recovery follows OAuth, failed operation and updated credentials',()=>{
+ const context={};vm.createContext(context);
+ vm.runInContext(source.slice(source.indexOf('function permissionRecovery('),source.indexOf('function renderPermissionRecovery(')),context);
+ const state={token_management:{managed:{kind:'oauth'}},cloudflare_permission_issues:[{credential:'cf_write_token',detail:'Cloudflare API HTTP 403：创建域名区域失败',status:'last_failure'}]};
+ let result=context.permissionRecovery(state);assert.equal(result.oauth,true);assert.equal(result.repair,false);assert.equal(result.replace,false);assert.equal(result.domain,true);
+ state.cloudflare_permission_issues[0].status='needs_recheck';assert.match(context.permissionRecovery(state).guide,/不代表当前授权仍然失败/);
+ state.cloudflare_permission_issues[0].credential='cf_read_token';result=context.permissionRecovery(state);assert.equal(result.oauth,false);assert.equal(result.credential,'cf_read_token');assert.equal(result.repair,true);
+ state.token_management.managed.kind='account';assert.equal(context.permissionRecovery(state).repair,false);
+});
+
+
+test('switching browser restarts only the active consent in the newly selected browser',async()=>{
+ const select={value:'chrome',disabled:false},restart={},calls=[];
+ const context={state:{browser_auth:{phase:'authorizing',browser:'default'}},localStorage:{setItem(){}},$:id=>id==='#cloudflare-browser'?select:restart,
+ recoverBrowserAuthorization:async(button,operation)=>{assert.equal(select.disabled,true);calls.push([button,operation,select.value]);},renderBrowserAuth:()=>{select.disabled=false;}};
+ vm.createContext(context);vm.runInContext(source.slice(source.indexOf('async function changeAuthorizationBrowser('),source.indexOf("$('#cloudflare-browser').onchange=")),context);
+ await context.changeAuthorizationBrowser();assert.equal(calls.length,1);assert.deepEqual(calls[0],[restart,'restart','chrome']);assert.equal(select.disabled,false);
+ context.state.browser_auth.browser='chrome';await context.changeAuthorizationBrowser();assert.equal(calls.length,1);
+ context.state.browser_auth.phase='done';select.value='default';await context.changeAuthorizationBrowser();assert.equal(calls.length,1);
+});
+
+test('an unconfirmed domain flags settings without marking existing websites',()=>{
+  const state=ready();state.domain_onboarding={domain:'new.example.net',phase:'preview'};
+  const {context}=harness(state);assert.deepEqual(Array.from(marked(context)),['settings']);
+  state.domain_onboarding.phase='done';assert.deepEqual(Array.from(marked(context)),[]);
+});
+
+test('background publication is progress rather than an instruction to publish again',()=>{
+  const state=ready();state.sites=[{id:'pending',hostname:'app.example.com',enabled:true,human_check:false}];state.published_hosts=[];state.publication_needs_review=true;
+  state.site_publication={phase:'publishing'};
+  const {context}=harness(state);assert.deepEqual(Array.from(context.navigationIssues(state).sites),[]);
+  state.site_publication.phase='failed';assert(context.navigationIssues(state).sites.length>0);
+});
+
+for(const operation of ['start','restart','select','create','token'])for(const success of [false,true]){
+ test('late '+operation+' callback cannot rewrite a newer session; success='+success,async()=>{
+  let finish,fail;const nodes={};
+  const node=key=>nodes[key]||(nodes[key]={dataset:{},value:'z',textContent:'',className:'',scrollIntoView(){},focus(){}});
+  const context={csrf:'old',state:{settings:{tunnel_id:''},connector:{running:false}},$:node,go(){},loadState:async()=>{},action:()=>new Promise((resolve,reject)=>{finish=resolve;fail=reject;})};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('async function startBrowserAuthorization('),source.indexOf('let browserAuthPoll;')),context);
+  vm.runInContext(source.slice(source.indexOf("$('#browser-zone-confirm').onclick"),source.indexOf('function renderTokenOperation(')),context);
+  vm.runInContext(source.slice(source.indexOf('function locateTunnelToken('),source.indexOf('function permissionRecovery(')),context);
+  const button={dataset:{}},pending=operation==='start'?context.startBrowserAuthorization(button):operation==='restart'?context.recoverBrowserAuthorization(button,'restart'):node(operation==='select'?'#browser-zone-confirm':operation==='create'?'#create-tunnel':'#tunnel-token-refresh').onclick({currentTarget:button});
+  const feedback=node(['create','token'].includes(operation)?operation==='create'?'#tunnel-feedback':'#tunnel-token-feedback':'#browser-auth-status');
+  context.csrf='new';context.state=null;feedback.textContent='当前会话提示';feedback.className='current';
+  if(success)finish({});else fail(Error('旧请求失败'));
+  await pending;assert.equal(feedback.textContent,'当前会话提示');assert.equal(feedback.className,'current');
+ });
+}
+
+for(const kind of ['settings','credentials','verification','password','site'])for(const success of [false,true]){
+ test('late '+kind+' save preserves newer-session input and feedback; success='+success,async()=>{
+  let finish,fail,requests=0;const nodes={};
+  const node=key=>nodes[key]||(nodes[key]={dataset:{},textContent:'',className:'',open:true});
+  const form={dataset:{},elements:{turnstile_sitekey:{value:'public-key'},turnstile_secret:{value:'fake-test-secret'},passcode:{value:'new-input'},enabled:{checked:true},human_check:{checked:false},passcode_required:{checked:false}},reset(){throw Error('Old save cleared current input');}};
+  const values={cf_read_token:'test-read',allowed_countries:'',allowed_ips:'',requests_per_minute:'180',session_minutes:'60'};
+  const pendingApi=()=>{requests++;return new Promise((resolve,reject)=>{finish=resolve;fail=reject;});};
+  const context={csrf:'old',replacingWriteToken:false,state:{settings:{turnstile_sitekey:'public-key'},credentials:{turnstile_secret:true},cloudflare_setup:{ready:true}},$:node,FormData:class{constructor(){}[Symbol.iterator](){return Object.entries(values)[Symbol.iterator]();}},action:pendingApi,api:pendingApi,selectedProtocols:()=>['http'],lockForm(){},unlockForm(){},renderSetup(){},renderActionAvailability(){},loadState:async()=>{},invalidatePlan(){throw Error('Old save invalidated current session');},toast(){},fillSettings(){},setLocalSecurity(){},showAuth(){throw Error('Old password save logged out current session');}};
+  vm.createContext(context);
+  const selector=kind==='verification'?'verification-credentials-form':kind+'-form';
+  const start=source.indexOf("$('#"+selector+"').onsubmit");
+  const end=kind==='verification'?source.indexOf("$('#password-form').onsubmit",start):source.indexOf('\n',start);
+  vm.runInContext(source.slice(start,end),context);
+  const pending=node('#'+selector).onsubmit({preventDefault(){},target:form,currentTarget:form,submitter:{dataset:{}}});
+  const feedback=node(kind==='site'?'#site-error':kind==='verification'?'#verification-feedback':'#'+kind+'-feedback');
+  context.csrf='new';feedback.textContent='当前会话提示';
+  if(success)finish({});else fail(Error('旧请求失败'));
+  await pending;assert.equal(feedback.textContent,'当前会话提示');assert.equal(form.elements.passcode.value,'new-input');assert.equal(form.elements.turnstile_secret.value,'fake-test-secret');assert.equal(requests,1);
+ });
+}
+
+for(const kind of ['zones','attach','retry-publication','preview','read'])for(const success of [false,true]){
+ test('late '+kind+' result neither mutates current inputs nor starts another write; success='+success,async()=>{
+  let finish,fail,requests=0;const nodes={};
+  const node=key=>nodes[key]||(nodes[key]={dataset:{},value:'current-input',textContent:'',className:'',elements:{cf_read_token:{value:'current-input'}}});
+  const pendingApi=()=>{requests++;return new Promise((resolve,reject)=>{finish=resolve;fail=reject;});};
+  const context={csrf:'old',state:{settings:{}},$:node,api:pendingApi,action:pendingApi,loadState:async()=>{},renderActionAvailability(){},invalidatePlan(){},configuredZones:()=>[],esc:x=>x,publicationRetryPending:false};
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf("$('#read-token-save').onclick="),source.indexOf("$('#sidebar-restart').onclick=")),context);
+  vm.runInContext(source.slice(source.indexOf("$('#publication-retry').onclick="),source.indexOf("api('bootstrap').then")),context);
+  const input={value:'current-input'},button={dataset:{},form:{elements:{cf_read_token:input}}};
+  const feedback=node(['retry-publication','preview'].includes(kind)?'#publish-feedback':kind==='read'?'#read-token-feedback':'#zones-feedback');
+  const pending=kind==='attach'?context.attachZone(button,{zone_name:'example.com'}):node(kind==='zones'?'#zones-discover':kind==='read'?'#read-token-save':kind==='preview'?'#preview':'#publication-retry').onclick({currentTarget:button});
+  context.csrf='new';feedback.textContent='当前会话提示';
+  if(success)finish({zones:[],revision:'old',routes_changed:false,dns:[]});else fail(Error('旧请求失败'));
+  await pending;assert.equal(feedback.textContent,'当前会话提示');assert.equal(input.value,'current-input');assert.equal(requests,1);
+ });
+}
+
+
+test('configuration actions refresh state once, including inline failures',async()=>{
+ for(const fails of [false,true]){
+  const calls=[];const context=asyncHarness({api:async(path)=>{calls.push(path);if(path==='state')return {settings:{},credentials:{},cloudflare_setup:{}};if(fails)throw Error('failed');return {saved:true};}});
+  const button={dataset:{},disabled:false};
+  if(fails)await assert.rejects(context.action(button,'settings',null,{},{inlineError:true}),/failed/);
+  else await context.action(button,'settings',null,{});
+  assert.deepEqual(calls,['settings','state']);
+ }
+ for(const [start,end] of [["$('#settings-form').onsubmit=","$('#credentials-form').onsubmit="],["$('#tunnel-token-refresh').onclick=",'function permissionRecovery('],["$('#token-manager-form').onsubmit=","$('#token-manager-form').oninput="]]){
+  const block=source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
+  assert(block.includes('await action('));assert(!block.includes('await loadState('),start);
+ }
 });

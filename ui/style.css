@@ -63,7 +63,7 @@
 
 .link-button{display:inline-flex;align-items:center;justify-content:center;border-radius:7px;padding:10px 17px;font-weight:600;line-height:1.6;text-decoration:none}.link-button:hover{text-decoration:none;filter:brightness(.96)}.link-button:focus-visible{outline:2px solid var(--green);outline-offset:3px}
 
-.browser-auth-panel{background:#f8faf9;border:1px solid var(--line);border-radius:8px;padding:16px;margin:4px 0 20px}.browser-auth-panel h3{font-size:14px}.browser-auth-panel p{font-size:12px}.browser-auth-panel button{white-space:normal}.browser-auth-heading{display:flex;align-items:center;gap:10px}.browser-auth-description{color:var(--muted);margin:8px 0 14px}.browser-auth-actions{align-items:center;gap:12px;flex-wrap:wrap}.browser-auth-help{font-size:12px;white-space:nowrap;text-decoration:none}.browser-auth-help:hover{text-decoration:underline}#browser-auth-status:empty{display:none}.browser-auth-panel #browser-zone-choice{margin-top:16px}
+.browser-auth-panel{background:#f8faf9;border:1px solid var(--line);border-radius:8px;padding:16px;margin:4px 0 20px}.browser-auth-panel p{font-size:12px}.browser-auth-panel button{white-space:normal}.browser-auth-description{color:var(--muted);margin:8px 0 14px}.browser-auth-actions{align-items:center;gap:12px;flex-wrap:wrap}.browser-auth-help{font-size:12px;white-space:nowrap;text-decoration:none}.browser-auth-help:hover{text-decoration:underline}#browser-auth-status:empty{display:none}.browser-auth-panel #browser-zone-choice{margin-top:16px}
 
 #view-overview .setup-progress-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:24px;align-items:center}#view-overview .setup-progress-panel h2{grid-column:1;margin-bottom:8px}#view-overview .setup-progress-panel p{grid-column:1;margin:0}#view-overview .setup-progress-panel>button{grid-column:2;grid-row:1 / 3;justify-self:end}
 @media(max-width:760px){#view-overview .setup-progress-panel{grid-template-columns:minmax(0,1fr);gap:12px}#view-overview .setup-progress-panel>button{grid-column:1;grid-row:auto;justify-self:start}}
@@ -221,7 +221,10 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 @media(max-width:760px){.connector-software-version{flex-wrap:wrap}.connector-software-version .button-row{flex-shrink:1}}
 
 .configured-zones{display:flex;flex-direction:column;gap:8px;margin:12px 0}
-.configured-zone{display:flex;align-items:center;justify-content:space-between;gap:12px;overflow-wrap:anywhere}
+.configured-zone{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;overflow-wrap:anywhere}
+.configured-zone>span{min-width:0;flex:1}
+.configured-zone-actions{display:flex;align-items:center;gap:12px;flex-shrink:0;margin-left:auto}
+@media(max-width:450px){.configured-zone>span{flex-basis:120px}}
 .zone-management{border-top:1px solid var(--line);padding-top:16px;margin:18px 0}
 .zone-management h3{margin:0;font-size:14px}
 .zone-management .local-browser-row{margin-top:12px}
@@ -263,7 +266,7 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .account-access-switch{display:inline-flex;gap:3px;padding:3px;margin-bottom:16px;background:#f0f3f1;border:1px solid #e5ebe7;border-radius:8px;max-width:100%}
 .account-access-switch button.secondary{background:transparent;border:1px solid transparent;border-radius:5px;padding:6px 13px;color:#65756c;box-shadow:none;font-size:12px;line-height:1.5;transition:background-color .12s,color .12s}
 .account-access-switch button.secondary[aria-pressed="true"]{background:white;color:var(--green);border-color:#e0e7e2;box-shadow:0 1px 2px #20382f0a}
-#account-manual-path>#settings-form{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+
 
 #account-browser-path .browser-auth-panel{background:transparent;border:0;border-radius:0;padding:0;margin:0}
 .browser-auth-description{margin:0 0 14px}
@@ -381,17 +384,19 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .connection-facts dt,.connection-facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
 .connection-facts dt{color:var(--muted)}
 .connection-facts #connector-path,.connection-facts #tunnel-id{font-family:Consolas,monospace;font-size:12px}
-#cloudflare-account-panel>#account-config-details,#cloudflare-account-panel>.account-tunnel-credentials{margin:8px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-#cloudflare-account-panel>#account-config-details{margin-top:14px}
-#cloudflare-account-panel>#account-config-details>summary,#cloudflare-account-panel>.account-tunnel-credentials>summary{font-size:13px;font-weight:500;line-height:1.6;color:var(--ink);cursor:pointer;padding:10px 12px;border:0;background:#f8faf9}
+#cloudflare-account-panel>:is(#domain-onboarding,#account-config-details){margin:12px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+#cloudflare-account-panel>#account-config-details>summary,#account-config-details #tunnel-maintenance>summary{font-size:13px;font-weight:500;line-height:1.6;color:var(--ink);cursor:pointer;padding:10px 12px;border:0;background:#f8faf9}
 #cloudflare-account-panel>#account-config-details>.advanced-body{padding:8px 12px 12px}
 .account-tunnel-credentials>summary span{float:right;margin:1px 0 0 12px;font-size:11px;font-weight:400}
-#cloudflare-account-panel>#account-config-details[open],#cloudflare-account-panel>.account-tunnel-credentials[open]{border-color:#ccdcd2}
-#cloudflare-account-panel>#account-config-details[open]>summary,#cloudflare-account-panel>.account-tunnel-credentials[open]>summary{color:var(--green);background:#f1f6f3}
-#cloudflare-account-panel>#account-config-details>summary:hover,#cloudflare-account-panel>.account-tunnel-credentials>summary:hover{background:#edf3ef}
-#cloudflare-account-panel>#account-config-details>summary:focus-visible,#cloudflare-account-panel>.account-tunnel-credentials>summary:focus-visible{outline:2px solid var(--green);outline-offset:-3px;border-radius:7px}
+#cloudflare-account-panel>#account-config-details[open],#account-config-details #tunnel-maintenance[open]{border-color:#ccdcd2}
+#cloudflare-account-panel>#account-config-details[open]>summary,#account-config-details #tunnel-maintenance[open]>summary{color:var(--green);background:#f1f6f3}
+#cloudflare-account-panel>#account-config-details>summary:hover,#account-config-details #tunnel-maintenance>summary:hover{background:#edf3ef}
+#cloudflare-account-panel>#account-config-details>summary:focus-visible,#account-config-details #tunnel-maintenance>summary:focus-visible{outline:2px solid var(--green);outline-offset:-3px;border-radius:7px}
 #account-config-details>.advanced-body>.account-access-switch{margin-bottom:12px}
 #account-config-details .browser-auth-description{margin:0 0 12px;line-height:1.65}
+#account-config-details #browser-auth-status{margin:10px 0 0;line-height:1.65}
+#browser-setup-retry{margin-top:12px}
+#account-config-details #browser-auth-error-time{margin:4px 0 0;line-height:1.5}
 #account-config-details .browser-auth-choice select{height:36px;padding:6px 10px;font-size:12px}
 
 .account-tunnel-credentials>div{margin:0;padding:8px 12px 12px;background:transparent}
@@ -710,3 +715,71 @@ main>footer{margin-top:30px;border-top:0;padding:16px 0 24px;justify-content:fle
 .secret-input::placeholder{color:#b1bcb4;-webkit-text-security:none}
 
 .token-input-row .secret-input{padding:9px 12px;line-height:20px}
+
+/* Domain onboarding uses existing controls; only its new record preview needs wrapping. */
+#domain-onboarding .advanced-body{min-width:0}
+#domain-preview>.advanced-body{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+#domain-preview>.advanced-body>*{min-width:0;margin:0}
+#domain-confirm,#domain-confirm-fields,#domain-finish-form{display:grid;gap:12px;min-width:0}
+#domain-confirm-fields>label,#domain-confirm>p,#domain-confirm>.button-row,#domain-finish-form>label{margin:0}
+#domain-finish-form>button{justify-self:start}
+#domain-onboarding td{overflow-wrap:anywhere;word-break:break-word}
+#domain-onboarding .table-wrap{max-height:360px;overflow:auto}
+#domain-onboarding table{table-layout:fixed;min-width:480px}
+#domain-onboarding th:first-child{width:58px}
+#domain-onboarding th:last-child{width:56px}
+#domain-preview .domain-onboarding-actions{margin:0}
+#domain-onboarding-status{margin:0}
+#domain-onboarding-status:empty{display:none}
+#cloudflare-account-panel>#domain-onboarding{margin-top:16px}
+#cloudflare-account-panel>#domain-onboarding>summary{padding:10px 12px;font-size:13px;font-weight:500;line-height:1.6;background:#f8faf9}
+#cloudflare-account-panel>#domain-onboarding[open]>summary{color:var(--green);background:#f1f6f3}
+#domain-onboarding>.advanced-body{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px}
+#domain-onboarding>.advanced-body>*{min-width:0}
+#domain-preview h3{overflow-wrap:anywhere}
+#aliyun-connected-domains>.panel-heading{margin-bottom:8px}
+#aliyun-connected-domains h3,#aliyun-connected-domains>p{margin:0}
+#aliyun-connected-domains .configured-zones:empty{display:none}
+#domain-onboarding>.advanced-body>p,#domain-prepare>p{margin:0}
+#domain-auth-details{border:1px solid var(--line);border-radius:8px;background:#f8faf9}
+#domain-auth-details>summary{padding:10px 12px;color:var(--ink)}
+#domain-auth-details[open]>summary{color:var(--green)}
+#domain-auth-details>.advanced-body{display:grid;gap:12px;padding:0 12px 12px}
+#domain-auth-details .account-access-switch{justify-self:start;margin-bottom:0}
+#domain-browser-path,#domain-ram-path,#domain-credentials{display:grid;gap:12px;min-width:0}
+#domain-browser-path>.button-row{margin:0;align-items:center}
+#domain-auth-description,#domain-ram-note,#domain-credentials>p{margin:0}
+#domain-credentials>label{margin:0;min-width:0}
+#domain-credentials>button{justify-self:start}
+#domain-credential-status{margin-left:4px;vertical-align:middle}
+.domain-help-link{white-space:nowrap;display:inline-block}
+.domain-prepare-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end}
+.domain-prepare-row>label{margin:0;min-width:0}
+.domain-prepare-row>button{margin-bottom:0}
+#domain-prepare{display:grid;gap:10px}
+#oauth-renewal-notice{margin:12px 0 0}
+#oauth-renewal-message{margin:8px 0 12px}
+@media(max-width:600px){.domain-prepare-row{grid-template-columns:minmax(0,1fr)}.domain-prepare-row>button{justify-self:start}}
+
+button.primary.destructive{background:#b44336;border-color:#b44336;color:#fff}
+
+button.caution{color:#a34b08}
+button.primary.caution{background:#a34b08;border-color:#a34b08;color:#fff}
+
+#account-permission-notice>p{margin:10px 0}
+#account-permission-notice>.button-row{align-items:center}
+#account-permission-notice>.button-row button{white-space:normal;text-align:left}
+#account-permission-notice>details{margin-top:8px}
+#account-permission-details>p{margin:8px 0 0}
+
+#domain-task-notice{display:grid;gap:10px}
+#domain-task-notice>strong{overflow-wrap:anywhere}
+#domain-task-notice>p{margin:0}
+#domain-task-open{justify-self:start;white-space:normal;text-align:left}
+
+#site-publication-notice{display:grid;gap:10px}
+#site-publication-message{overflow-wrap:anywhere}
+#site-publication-notice>.button-row:has(button[hidden]){display:none}
+
+#account-config-details .account-authorization-heading{margin:0 0 12px;font-size:14px}
+#account-config-details #tunnel-maintenance{margin:12px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}

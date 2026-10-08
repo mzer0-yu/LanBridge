@@ -36,7 +36,7 @@ def test_bearer_scope_origin_expiry_and_revocation(service):
     assert state.status_code==200 and state.json()['access_scope']=='sites'
     assert not state.json()['audit'] and not state.json()['agent_skill_path']
     assert state.json()['audit_storage'] == {}
-    for path in ['/api/password','/api/settings','/api/credentials','/api/gateway-port','/api/temporary-tokens','/api/connector/update','/api/cloudflare/create-tunnel','/api/shutdown','/api/local-login/approve']:
+    for path in ['/api/password','/api/settings','/api/credentials','/api/gateway-port','/api/temporary-tokens','/api/connector/update','/api/cloudflare/create-tunnel','/api/cloudflare/browser-authorize-refresh','/api/shutdown','/api/local-login/approve']:
         assert client.post(path,json={}).status_code==403,path
     assert client.get('/api/temporary-tokens').status_code==403
     site=service.save_site({'name':'demo','hostname':'demo.example.com','origin':'http://127.0.0.1:9300','human_check':False})
@@ -63,6 +63,7 @@ def test_browser_login_obeys_csrf_scope_and_revocation(service):
     client.headers['X-CSRF-Token']=bootstrap['csrf']
     assert client.post('/api/connector/stop',json={}).status_code==200
     assert client.post('/api/settings',json={}).status_code==403
+    assert client.post('/api/cloudflare/browser-authorize-refresh',json={}).status_code==403
     service.store.revoke_temporary_token(grant['id'])
     assert not client.get('/api/bootstrap').json()['authenticated']
     assert client.get('/api/state').status_code==401

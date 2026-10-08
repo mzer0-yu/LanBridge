@@ -1,4 +1,5 @@
 'use strict';
+let loadedFrontendRevision;
 // Service credentials are masked text, not browser login-password fields.
 for(const field of document.querySelectorAll('textarea.secret-input')){
   field.addEventListener('input',()=>{
@@ -70,8 +71,8 @@ for(const button of document.querySelectorAll('[data-login-method]')){
   button.onclick=()=>setLoginMethod(button.dataset.loginMethod);
   button.onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const method=e.key==='Home'?'admin':e.key==='End'?'token':button.dataset.loginMethod==='admin'?'token':'admin';setLoginMethod(method);$('#login-'+method+'-tab').focus();};
 }
-function showAuth(){$('#operation-feedback').hidden=true;revealedTemporaryTokens.clear();$('#temporary-token-list').innerHTML='';clearTemporaryToken();$('#login-methods').hidden=!initialized;setLoginMethod('admin');$('#temporary-login-form').reset();for(const kind of ['api-token','authority-token']){clearTokenDiscovery(kind);$('#'+kind+'-discovery-feedback').textContent='';}sitePauseErrors.clear();sitePausePending.clear();cloudCheck={pending:false,error:'',tunnel:''};window.localLoginUI?.show(initialized);csrf='';state=null;stateSequence++;appliedStateSequence=stateSequence;invalidatePlan();$('#credentials-form').reset();$('#token-manager-form').reset();$('#site-form [name=passcode]').value='';replacingWriteToken=false;$('#verification-credentials-form').reset();$('#verification-credentials-form').dataset.dirty='';$('#verification-feedback').textContent='';$('#auth').hidden=false;$('#shell').hidden=true;$('#auth-title').textContent=initialized?'欢迎回来':'创建管理员账户';$('#auth-desc').textContent=window.localLoginUI?.approvalId?'请先登录，随后会显示确认码和允许登录按钮。':initialized?'':'首次使用，请设置本机管理员。密码至少 12 位。';$('#auth-desc').hidden=!$('#auth-desc').textContent;$('#auth-submit').textContent=initialized?'登录管理台 →':'创建账户并登录 →';$('#auth-form [name=password]').minLength=initialized?1:12;$('#auth-form [name=password]').autocomplete=initialized?'current-password':'new-password'}
-async function loadState(){if(!csrf)return;const session=csrf,sequence=++stateSequence;try{const next=await api('state');if(session!==csrf||sequence<appliedStateSequence)return;if(currentView==='audit'&&state?.audit?.length>100&&next.audit_storage?.oldest_id){const fresh=new Set(next.audit.map(row=>row.id));next.audit.push(...state.audit.filter(row=>row.id>=next.audit_storage.oldest_id&&!fresh.has(row.id)));next.audit.sort((a,b)=>b.id-a.id);}state=next;appliedStateSequence=sequence;$('#state-refresh-warning').hidden=true;render();$('#last-refresh').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');}catch(err){if(session===csrf&&sequence>=appliedStateSequence)$('#state-refresh-warning').hidden=false;throw err;}}
+function showAuth(){browserAuthInteraction=false;$('#tunnel-maintenance').dataset.connectionState='';$('#tunnel-maintenance').open=false;if(sitePublicationPoll){clearInterval(sitePublicationPoll);sitePublicationPoll=null;}$('#site-publication-notice').hidden=true;window.domainOnboardingUI?.reset();$('#operation-feedback').hidden=true;revealedTemporaryTokens.clear();$('#temporary-token-list').innerHTML='';clearTemporaryToken();$('#login-methods').hidden=!initialized;setLoginMethod('admin');$('#temporary-login-form').reset();for(const kind of ['api-token','authority-token']){clearTokenDiscovery(kind);$('#'+kind+'-discovery-feedback').textContent='';}sitePauseErrors.clear();sitePausePending.clear();cloudCheck={pending:false,error:'',tunnel:''};window.localLoginUI?.show(initialized);csrf='';state=null;stateSequence++;appliedStateSequence=stateSequence;invalidatePlan();$('#credentials-form').reset();$('#token-manager-form').reset();$('#site-form [name=passcode]').value='';replacingWriteToken=false;$('#verification-credentials-form').reset();$('#verification-credentials-form').dataset.dirty='';$('#verification-feedback').textContent='';$('#auth').hidden=false;$('#shell').hidden=true;$('#auth-title').textContent=initialized?'欢迎回来':'创建管理员账户';$('#auth-desc').textContent=window.localLoginUI?.approvalId?'请先登录，随后会显示确认码和允许登录按钮。':initialized?'':'首次使用，请设置本机管理员。密码至少 12 位。';$('#auth-desc').hidden=!$('#auth-desc').textContent;$('#auth-submit').textContent=initialized?'登录管理台 →':'创建账户并登录 →';$('#auth-form [name=password]').minLength=initialized?1:12;$('#auth-form [name=password]').autocomplete=initialized?'current-password':'new-password'}
+async function loadState(){if(!csrf)return;const session=csrf,sequence=++stateSequence;try{const next=await api('state');if(session!==csrf||sequence<appliedStateSequence)return;if(currentView==='audit'&&state?.audit?.length>100&&next.audit_storage?.oldest_id){const fresh=new Set(next.audit.map(row=>row.id));next.audit.push(...state.audit.filter(row=>row.id>=next.audit_storage.oldest_id&&!fresh.has(row.id)));next.audit.sort((a,b)=>b.id-a.id);}state=next;appliedStateSequence=sequence;const updateNotice=$('#runtime-update-notice');const update=next.update_status;if(update?.frontend_revision&&!loadedFrontendRevision)loadedFrontendRevision=update.frontend_revision;updateNotice.textContent=update?.phase==='frontend'?(update.frontend_revision!==loadedFrontendRevision?'界面已更新，请刷新页面':''):update?.message||'';updateNotice.hidden=!updateNotice.textContent;$('#state-refresh-warning').hidden=true;render();$('#last-refresh').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');}catch(err){if(session===csrf&&sequence>=appliedStateSequence)$('#state-refresh-warning').hidden=false;throw err;}}
 let refreshFeedbackTimer;
 async function refreshState(){
   const button=$('#refresh'),icon=button.querySelector('span'),status=$('#refresh-status'),session=csrf;
@@ -127,7 +128,7 @@ function renderAgentGuide(){
       '认证方式：优先使用用户签发的临时管理 Token，请求头 Authorization: Bearer <token>，按 Token 的 permissions 管理网站转发或 Cloudflare 账户与域名。到期或撤销后停止并请用户重新授权。Token 不放入 URL，不输出凭据。'+(publicEndpoint?'公网 Token 接入不需要入口验证 Cookie，但仍受 HTTPS、入口暂停、IP/国家与限流策略约束。管理员密码登录则须先在同一浏览器完成入口验证。':'管理员密码登录也可 POST /api/login，JSON 为 username、password，Origin 为 '+publicBase+'。')+'未获得凭据时请用户授权，不读取服务器凭据文件。',
       'GET /api/bootstrap 核对 authenticated 与 scope，再 GET /api/state 获取 sites、settings、connector、published_hosts。写入使用 POST JSON 和 Content-Type: application/json。临时管理 Token 请求使用 Bearer，无需 Cookie 或 CSRF。密码登录需保留会话 Cookie 和 csrf，写请求携带 X-CSRF-Token: bootstrap.csrf 与同源 Origin '+publicBase+'。不要导出 Cookie、密码、Token 或 csrf 到对话。',
       '仅管理员或已获 account 权限的临时管理 Token 可修改域名接入：state.settings.zones 是已接入域名列表。POST /api/cloudflare/zones + {} 读取同一账户的可用域名；POST /api/zones + {"zone_id":"32位区域ID","zone_name":"example.com"} 核验并接入，不要通过 /api/settings 替换 zones。',
-      '新增或编辑网站：POST /api/sites。编辑时从 state.sites 取完整现有对象，保留 id 和未要求改变的字段；不能直接改已有 hostname。普通网站示例：{"name":"示例网站","hostname":"app.example.com","origin":"http://192.168.1.20:8080","target":"website","enabled":true,"paused":false,"protocols":["http","websocket"],"human_check":true,"passcode_required":false,"allowed_countries":["CN","HK","JP","US"],"allowed_ips":[],"requests_per_minute":180,"session_minutes":60}。域名需属于 settings.zones 中的域名，可填写对应 zone_id；省略时按域名自动匹配。origin 是运行 LanBridge 的电脑访问的源站地址；回环地址指服务器自身，不是你的电脑。',
+      '新增或编辑网站：POST /api/sites。编辑时从 state.sites 取完整现有对象，保留 id 和未要求改变的字段；修改 hostname 时核对新域名归属；保存后旧地址停止转发，保留网站 ID 和其他配置。普通网站示例：{"name":"示例网站","hostname":"app.example.com","origin":"http://192.168.1.20:8080","target":"website","enabled":true,"paused":false,"protocols":["http","websocket"],"human_check":true,"passcode_required":false,"allowed_countries":["CN","HK","JP","US"],"allowed_ips":[],"requests_per_minute":180,"session_minutes":60}。域名需属于 settings.zones 中的域名，可填写对应 zone_id；省略时按域名自动匹配。origin 是运行 LanBridge 的电脑访问的源站地址；回环地址指服务器自身，不是你的电脑。',
       'POST /api/sites/{id}/pause + {"paused":true} 暂停；{"paused":false} 恢复。停用网站通过 POST /api/sites 保存 enabled:false。不要误停用或暂停正在使用的 LanBridge 公网入口，否则会失去远程访问。',
       '保存自动准备人类验证并发布所需路由；检查响应 publication.status：failed 表示已保存但发布未完成。发布失败时检查原因，再 POST /api/cloudflare/preview + {}，向 POST /api/cloudflare/apply 提交 {"revision":"预览返回的 revision"}；保留其他路由，不覆盖冲突 DNS。',
       'POST /api/sites/{id}/probe + {} 检查源站，随后 GET /api/state 核对结果；源站可达和路由已发布不等于实际公网访问已通过，应在授权会话验证目标网站。遇到 401 或 verification_required 请用户重新登录或完成入口验证；不要无限重试。',
@@ -223,14 +224,15 @@ function auditResourceSummary(record){
   const labels={id:record.action.startsWith('temporary_token_')?'令牌 ID':'对象 ID',name:'名称',hostname:'域名',zone_name:'域名',zone_id:'域名 ID',account_id:'账户 ID',site_id:'网站 ID',permissions:'权限',limit_mb:'日志上限',port:'端口',pid:'进程',enabled:'启用',version:'版本',hostnames:'域名',automatic:'自动发布',reconcile_required:'需核对',source:'来源',running_restored:'恢复运行'};
   const values=Object.entries(detail).slice(0,3).map(([key,value])=>{
     let text=typeof value==='boolean'?(value?'是':'否'):Array.isArray(value)?value.map(v=>v==='sites'?'网站转发':v==='account'?'账户与域名':String(v)).join('、'):typeof value==='object'?JSON.stringify(value):String(value??'—');
+    if(record.action==='oauth_refresh_failed'&&key==='reason')text=({invalid_grant:'刷新凭据被拒绝',invalid_client:'授权客户端被拒绝',network:'网络连接失败',timeout:'请求超时',cli_failure:'授权工具执行失败',profile_invalid:'未返回有效新授权'})[value]||'原因未确认';
     if(key==='limit_mb')text+=' MB';
     if((key==='id'||key.endsWith('_id'))&&text.length>16)text=text.slice(0,12)+'…';
-    return '<span class="audit-resource-field"><span>'+esc(labels[key]||key)+'</span><b>'+esc(text)+'</b></span>';
+    return '<span class="audit-resource-field"><span>'+esc(labels[key]||({reason:'原因',manual_retry:'手动重试'})[key]||key)+'</span><b>'+esc(text)+'</b></span>';
   });
   return '<div class="audit-resource-summary">'+values.join('')+'</div>';
 }
 function renderAudit(){
-const actionNames={connector_auto_start_changed:'修改启动时自动连接',public_client_changed:'修改公网转发列表',temporary_token_created:'创建临时管理令牌',temporary_token_revoked:'撤销临时管理令牌',temporary_token_viewed:'查看临时管理令牌',temporary_token_login:'临时令牌登录',audit_limit_changed:'修改日志大小上限',gateway_port_scheduled:'修改网关端口',connector_updated:'更新连接器',zone_added:'接入域名',zone_removed:'移除域名',admin_initialized:'初始化管理员',admin_login:'管理员登录',site_saved:'保存网站策略',site_paused:'暂停网站转发',site_resumed:'恢复网站转发',settings_saved:'保存账户配置',admin_local_login:'本机授权登录',local_login_approved:'允许本机授权登录',local_login_denied:'拒绝本机授权登录',credentials_updated:'更新凭据',api_token_connected:'通过 API Token 接入',browser_oauth_connected:'浏览器授权连接 Cloudflare',platform_shutdown_requested:'退出 LanBridge',platform_restart_requested:'重启 LanBridge',admin_port_scheduled:'修改管理台端口',business_token_created:'创建写入令牌',business_token_updated:'更新写入令牌',read_token_created:'创建只读令牌',read_token_updated:'更新只读令牌',tunnel_created:'创建隧道',turnstile_updated:'同步 Turnstile',publish_verified:'发布并核验成功',publish_incomplete:'发布未完成，需核对',connector_prepared:'检测 / 安装连接器',connector_started:'启动连接器',connector_stopped:'停止连接器',admin_password_changed:'修改管理员密码'};const opened=new Set([...document.querySelectorAll('#audit-table details[open]')].map(el=>el.dataset.auditId));
+const actionNames={oauth_refresh_failed:'管理授权续期失败',aliyun_oauth_connected:'阿里云浏览器授权',aliyun_credentials_saved:'保存阿里云凭据',domain_onboarding_prepared:'准备域名迁移',domain_nameservers_submitted:'提交 DNS 服务器变更',domain_onboarding_completed:'完成域名自动接入',domain_onboarding_failure_dismissed:'暂不接入新域名',domain_onboarding_tracking_closed:'结束域名接入跟踪',connector_auto_start_changed:'修改启动时自动连接',public_client_changed:'修改公网转发列表',temporary_token_created:'创建临时管理令牌',temporary_token_revoked:'撤销临时管理令牌',temporary_token_viewed:'查看临时管理令牌',temporary_token_login:'临时令牌登录',audit_limit_changed:'修改日志大小上限',gateway_port_scheduled:'修改网关端口',connector_updated:'更新连接器',zone_added:'接入域名',zone_removed:'移除域名',admin_initialized:'初始化管理员',admin_login:'管理员登录',site_saved:'保存网站策略',site_paused:'暂停网站转发',site_resumed:'恢复网站转发',settings_saved:'保存账户配置',admin_local_login:'本机授权登录',local_login_approved:'允许本机授权登录',local_login_denied:'拒绝本机授权登录',credentials_updated:'更新凭据',api_token_connected:'通过 API Token 接入',browser_oauth_connected:'浏览器授权连接 Cloudflare',platform_shutdown_requested:'退出 LanBridge',platform_restart_requested:'重启 LanBridge',admin_port_scheduled:'修改管理台端口',business_token_created:'创建写入令牌',business_token_updated:'更新写入令牌',read_token_created:'创建只读令牌',read_token_updated:'更新只读令牌',tunnel_created:'创建隧道',turnstile_updated:'同步 Turnstile',publish_verified:'发布并核验成功',publish_incomplete:'发布未完成，需核对',connector_prepared:'检测 / 安装连接器',connector_started:'启动连接器',connector_stopped:'停止连接器',admin_password_changed:'修改管理员密码'};const opened=new Set([...document.querySelectorAll('#audit-table details[open]')].map(el=>el.dataset.auditId));
 $('#audit-table').innerHTML=state.audit.length?'<div class="table-wrap"><table><thead><tr><th scope="col">时间</th><th scope="col">操作</th><th scope="col">对象与详情</th></tr></thead><tbody>'+state.audit.map(a=>{
   const date=new Date(a.at*1000),hasDetails=a.detail&&Object.keys(a.detail).length;
   return `<tr><td class="audit-time"><time datetime="${date.toISOString()}"><strong>${esc(date.toLocaleTimeString('zh-CN',{hour12:false}))}</strong><span>${esc(date.toLocaleDateString('zh-CN'))}</span></time></td><td class="audit-action">${esc(actionNames[a.action]||a.action)}</td><td class="audit-resource"><div class="audit-resource-body">${auditResourceSummary(a)}${hasDetails?`<details class="audit-raw-details" data-audit-id="${esc(a.id)}" ${opened.has(String(a.id))?'open':''}><summary>原始详情</summary><pre>${esc(JSON.stringify(a.detail,null,2))}</pre></details>`:''}</div></td></tr>`;
@@ -298,7 +300,7 @@ function temporaryPermissionText(permissions){return (permissions||['sites']).ma
 function renderTemporaryAccess(){
   const limited=state?.access_scope==='sites',account=!limited||temporaryPermissions().includes('account'),sites=!limited||temporaryPermissions().includes('sites');
   for(const view of ['sites','settings','interfaces','audit'])$('[data-view='+view+']').hidden=limited&&!temporaryViews().includes(view);
-  document.querySelectorAll('[data-goto=settings],[data-setup],[data-browser-authorize],[data-token-manager]').forEach(el=>{el.hidden=!account;});
+  document.querySelectorAll('[data-goto=settings],[data-setup],[data-browser-authorize],[data-token-manager]').forEach(el=>{el.hidden=!account||(el.id==='oauth-renewal-reauthorize'&&!state.oauth_refresh?.retry_failed);});
   $('.public-access-panel').hidden=limited;
   $('.temporary-tokens-panel').hidden=limited;$('.temporary-token-list-panel').hidden=limited;
   $('.local-security-panel').hidden=limited;
@@ -314,8 +316,9 @@ function renderTemporaryAccess(){
   if(currentView==='tokens'&&!limited)loadTemporaryTokens().catch(err=>$('#temporary-token-feedback').textContent=err.message);
   if(currentView==='tokens'&&limited)go(temporaryPermissions().includes('sites')?'sites':'settings');
   $('#shutdown').hidden=limited||remoteAccess;
-  $('#restart').disabled=limited||remoteAccess||state.restart_supported!==true;
-  $('#restart').title=remoteAccess?'仅支持本机重启':state.restart_supported!==true?'当前运行方式不支持网页重启，请使用启动器':'';
+  $('#sidebar-restart').hidden=limited||remoteAccess;
+  $('#sidebar-restart').disabled=state.restart_supported!==true;
+  $('#sidebar-restart').title=state.restart_supported===true?'重启管理台、网关，并恢复连接器原状态':'当前运行方式不支持网页重启，请使用启动器';
   $('#add-site').hidden=!sites||currentView!=='sites';$('#overview-add-site').hidden=!sites;
   document.querySelectorAll('[data-goto=sites]').forEach(el=>{el.hidden=!sites;});
   $('#temporary-access-notice').hidden=!limited;
@@ -576,7 +579,7 @@ function updateSiteControls(){
   $('#policy-save-hint').hidden=!form.elements.id.value||!(form.elements.human_check.checked||form.elements.passcode_required.checked);
 }
 function selectedProtocols(form){return ['http','websocket'].filter(key=>form.elements['protocol_'+key].checked);}
-function editSite(id){if(!state)return;if(!id&&!state.cloudflare_setup?.ready){locateSetup();toast(setupMessage(),true);return;}const site=state.sites.find(s=>s.id===id);const form=$('#site-form');form.reset();form.elements.zone_id.innerHTML=configuredZones(state).map(z=>`<option value="${esc(z.zone_id)}">${esc(z.zone_name)}</option>`).join('');form.elements.id.value='';form.elements.hostname.readOnly=false;$('#site-error').textContent='';$('#site-dialog-title').textContent=site?'编辑网站与策略':'添加网站';$('#policy-save-hint').hidden=!site;if(site){for(const el of form.elements){if(!el.name||el.name==='passcode'||el.name.startsWith('protocol_'))continue;const v=site[el.name];if(el.type==='checkbox')el.checked=!!v;else el.value=Array.isArray(v)?v.join(', '):v??'';}form.elements.hostname.readOnly=true;}form.elements.zone_id.value=site?.zone_id||configuredZones(state).filter(z=>site?.hostname.endsWith('.'+z.zone_name)).sort((a,b)=>b.zone_name.length-a.zone_name.length)[0]?.zone_id||state.settings.zone_id;form.elements.zone_id.disabled=!!site;form.elements.hostname.placeholder='app.'+(configuredZones(state).find(z=>z.zone_id===form.elements.zone_id.value)?.zone_name||'example.com');form.elements.target.value=site?.target||'website';const protocols=site?.protocols||['http','websocket'];for(const key of ['http','websocket'])form.elements['protocol_'+key].checked=protocols.includes(key);updateSiteControls();$('#site-dialog').showModal();$('.site-dialog-body').scrollTop=0;}
+function editSite(id){if(!state)return;if(!id&&!state.cloudflare_setup?.ready){locateSetup();toast(setupMessage(),true);return;}const site=state.sites.find(s=>s.id===id);const form=$('#site-form');form.reset();form.elements.zone_id.innerHTML=configuredZones(state).map(z=>`<option value="${esc(z.zone_id)}">${esc(z.zone_name)}</option>`).join('');form.elements.id.value='';form.elements.hostname.readOnly=false;$('#site-error').textContent='';$('#site-dialog-title').textContent=site?'编辑网站与策略':'添加网站';$('#policy-save-hint').hidden=!site;if(site){for(const el of form.elements){if(!el.name||el.name==='passcode'||el.name.startsWith('protocol_'))continue;const v=site[el.name];if(el.type==='checkbox')el.checked=!!v;else el.value=Array.isArray(v)?v.join(', '):v??'';}}form.elements.zone_id.value=site?.zone_id||configuredZones(state).filter(z=>site&&(site.hostname===z.zone_name||site.hostname.endsWith('.'+z.zone_name))).sort((a,b)=>b.zone_name.length-a.zone_name.length)[0]?.zone_id||state.settings.zone_id;form.elements.zone_id.disabled=false;form.elements.hostname.placeholder='app.'+(configuredZones(state).find(z=>z.zone_id===form.elements.zone_id.value)?.zone_name||'example.com');form.elements.target.value=site?.target||'website';const protocols=site?.protocols||['http','websocket'];for(const key of ['http','websocket'])form.elements['protocol_'+key].checked=protocols.includes(key);updateSiteControls();$('#site-dialog').showModal();$('.site-dialog-body').scrollTop=0;}
 async function setSitePaused(id){
   const site=state?.sites.find(row=>row.id===id),session=csrf;
   if(!site||sitePausePending.has(id))return;
@@ -590,10 +593,10 @@ async function setSitePaused(id){
   }catch(err){if(session===csrf&&state){sitePauseErrors.set(id,err.message);await loadState().catch(()=>{});}}
   finally{sitePausePending.delete(id);if(session===csrf&&state)render();}
 }
-async function action(button,path,message,data={}){if(button.dataset.busy)throw Error('操作正在进行，请稍候');const session=csrf;button.dataset.busy='true';button.disabled=true;try{const result=await api(path,data);if(session!==csrf)throw Error('登录状态已变化，请在当前会话核对操作结果');if(state){for(const key of ['settings','credentials','cloudflare_setup','cloudflare_permission_issues'])if(result[key])state[key]=result[key];}if(message)toast(message);try{await loadState()}catch{if(session===csrf){if(state)render();toast('操作已完成，但状态刷新失败。请刷新状态，勿重复提交。',true)}}if(session!==csrf)throw Error('登录状态已变化，请在当前会话核对操作结果');return result}catch(e){if(session===csrf){toast(e.message,true);await loadState().catch(()=>{});}throw e}finally{button.dataset.busy='';button.disabled=false;if(state)renderActionAvailability();}}
+async function action(button,path,message,data={},options={}){if(button.dataset.busy)throw Error('操作正在进行，请稍候');const session=csrf;button.dataset.busy='true';button.disabled=true;try{const result=await api(path,data);if(session!==csrf)throw Error('登录状态已变化，请在当前会话核对操作结果');if(state){for(const key of ['settings','credentials','cloudflare_setup','cloudflare_permission_issues','site_publication'])if(result[key])state[key]=result[key];}if(message)toast(message);try{await loadState()}catch{if(session===csrf){if(state)render();toast('操作已完成，但状态刷新失败。请刷新状态，勿重复提交。',true)}}if(session!==csrf)throw Error('登录状态已变化，请在当前会话核对操作结果');return result}catch(e){if(session===csrf){if(!options.inlineError)toast(e.message,true);await loadState().catch(()=>{});}throw e}finally{button.dataset.busy='';button.disabled=false;if(state)renderActionAvailability();}}
 $('#auth-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('#auth-submit');button.disabled=true;$('#auth-error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));if(!initialized){await api('setup',data);initialized=true;}const result=await api('login',data);csrf=result.csrf;e.target.elements.password.value='';openShell();}catch(err){$('#auth-error').textContent=err.message}finally{button.disabled=false}});
 document.addEventListener('click',async e=>{const el=e.target.closest('button');if(!el)return;if(el.dataset.copy){try{await navigator.clipboard.writeText($('#'+el.dataset.copy).textContent);markCopied(el)}catch{toast('复制失败，请手动选择示例内容复制',true)}}if(el.dataset.addSite){el.disabled=true;try{await $('#add-site').onclick()}finally{el.disabled=false}}if(el.dataset.view)go(el.dataset.view);if(el.dataset.goto){go(el.dataset.goto);if(el.dataset.section){const section=document.getElementById(el.dataset.section);if(section&&!section.closest('[hidden]')){section.focus({preventScroll:true});section.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});}}}if(el.dataset.setup)locateSetup(el.dataset.setup);if(el.dataset.tokenManager)locateTokenManager();if(el.dataset.browserAuthorize)await startBrowserAuthorization(el);if(el.dataset.edit)editSite(el.dataset.edit);if(el.dataset.pauseSite)await setSitePaused(el.dataset.pauseSite);if(el.dataset.probe){try{const r=await action(el,'sites/'+el.dataset.probe+'/probe');toast(r.reachable?'源站可达 · HTTP '+r.http_status:'局域网源站暂不可达',!r.reachable)}catch{}}});
-$('#add-site').onclick=async()=>{const button=$('#add-site');button.disabled=true;try{await loadState();editSite();}catch(e){toast('无法检查配置，请刷新后重试：'+e.message,true)}finally{if(state)renderSetup();}};$('#close-dialog').onclick=$('#cancel-site').onclick=()=>$('#site-dialog').close();$('#refresh').onclick=refreshState;
+$('#add-site').onclick=async()=>{const button=$('#add-site');button.disabled=true;try{await loadState();editSite();}catch(e){toast('无法检查配置，请刷新后重试：'+e.message,true)}finally{if(state)renderSetup();}};$('#close-dialog').onclick=$('#cancel-site').onclick=()=>$('#site-dialog').close();$('#refresh').onclick=()=>{if(state?.browser_auth?.phase==='done')browserAuthInteraction=false;return refreshState();};
 $('#logout').onclick=async()=>{try{await api('logout',{});showAuth()}catch(e){toast(e.message,true)}};
 $('#shutdown').onclick=()=>{$('#shutdown-error').textContent='';$('#shutdown-dialog').showModal();};
 $('#cancel-shutdown').onclick=()=>$('#shutdown-dialog').close();
@@ -652,8 +655,8 @@ for(const kind of ['api-token','authority-token']){
 }
 $('#credentials-form').oninput=e=>{$('#credentials-feedback').textContent=e.target.name==='cf_read_token'&&e.target.value.trim()?'只读令牌尚未保存':'';renderSetup();};
 $('#setup-progress-add').onclick=()=>{const next=$('#setup-progress-add').dataset.next;if(next==='add')return $('#add-site').onclick();if(next==='verification'){go('settings');$('#human-verification-panel').scrollIntoView({behavior:'smooth',block:'center'});return $('#widget-create').onclick({currentTarget:$('#widget-create')});}if(next)go(next);};
-$('#settings-form').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,data=Object.fromEntries(new FormData(form));lockForm(form);try{await action(e.submitter,'settings','配置已保存',data);form.dataset.dirty='';invalidatePlan();await loadState().catch(()=>{});if(state)fillSettings();$('#settings-feedback').textContent='配置已保存';}catch(err){$('#settings-feedback').textContent=err.message}finally{unlockForm(form);if(state)renderSetup();}};
-$('#credentials-form').onsubmit=async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));if(String(values.cf_write_token||'').trim()&&!$('#manual-account-config').open){await discoverTokenAccess('api-token');return;}if(!Object.values(values).some(value=>String(value).trim())||(replacingWriteToken&&!String(values.cf_write_token||'').trim())){$('#credentials-feedback').textContent='请先粘贴要保存的新令牌；无需更换时点击取消更换。';if(!state.credentials.cf_write_token||replacingWriteToken)revealWriteToken();return;}lockForm(e.target);try{await action(e.submitter,'credentials','凭据已保存',values);e.target.reset();replacingWriteToken=false;invalidatePlan();renderSetup();$('#credentials-feedback').textContent=state.cloudflare_setup.ready?'凭据已保存，配置已就绪。':'凭据已保存。'+setupMessage();}catch(err){$('#credentials-feedback').textContent=err.message}finally{unlockForm(e.target);if(state)renderSetup();}};
+$('#settings-form').onsubmit=async e=>{e.preventDefault();const session=csrf,form=e.currentTarget,data=Object.fromEntries(new FormData(form));lockForm(form);try{await action(e.submitter,'settings','配置已保存',data);if(session!==csrf)return;form.dataset.dirty='';invalidatePlan();if(state)fillSettings();$('#settings-feedback').textContent='配置已保存';}catch(err){if(session===csrf)$('#settings-feedback').textContent=err.message}finally{unlockForm(form);if(state)renderSetup();}};
+$('#credentials-form').onsubmit=async e=>{e.preventDefault();const session=csrf,values=Object.fromEntries(new FormData(e.target));if(String(values.cf_write_token||'').trim()&&!$('#manual-account-config').open){await discoverTokenAccess('api-token');return;}if(!Object.values(values).some(value=>String(value).trim())||(replacingWriteToken&&!String(values.cf_write_token||'').trim())){$('#credentials-feedback').textContent='请先粘贴要保存的新令牌；无需更换时点击取消更换。';if(!state.credentials.cf_write_token||replacingWriteToken)revealWriteToken();return;}lockForm(e.target);try{await action(e.submitter,'credentials','凭据已保存',values);if(session!==csrf||!state)return;e.target.reset();replacingWriteToken=false;invalidatePlan();renderSetup();$('#credentials-feedback').textContent=state.cloudflare_setup.ready?'凭据已保存，配置已就绪。':'凭据已保存。'+setupMessage();}catch(err){if(session===csrf)$('#credentials-feedback').textContent=err.message}finally{unlockForm(e.target);if(state)renderSetup();}};
 function updateVerificationDirty(){
   if(!state)return;
   const form=$('#verification-credentials-form'),feedback=$('#verification-feedback');
@@ -665,22 +668,22 @@ function updateVerificationDirty(){
 $('#verification-credentials-form').oninput=updateVerificationDirty;
 $('#verification-credentials-form').onchange=updateVerificationDirty;
 $('#verification-credentials-form').onsubmit=async e=>{
-  e.preventDefault();const form=e.currentTarget,feedback=$('#verification-feedback');
+  e.preventDefault();const session=csrf,settings={...state.settings},form=e.currentTarget,feedback=$('#verification-feedback');
   const sitekey=form.elements.turnstile_sitekey.value.trim(),secret=form.elements.turnstile_secret.value.trim();
   if(!sitekey){feedback.textContent='请填写 Site Key';return;}
   if((!state.credentials.turnstile_secret||sitekey!==state.settings.turnstile_sitekey)&&!secret){feedback.textContent='请同时填写与 Site Key 对应的 Secret Key';return;}
   if(secret&&(secret.length<10||secret.length>4096)){feedback.textContent='Secret Key 长度无效';return;}
   lockForm(form);let secretSaved=false,configSaved=false;
   try{
-    if(secret){await api('credentials',{turnstile_secret:secret});secretSaved=true;form.elements.turnstile_secret.value='';}
-    await api('settings',{...state.settings,turnstile_sitekey:sitekey});configSaved=true;
-    form.dataset.dirty='';invalidatePlan();await loadState();feedback.textContent='人类验证配置已保存';
-  }catch(err){feedback.textContent=(configSaved?'配置已保存，但状态刷新失败，请刷新页面确认。':secretSaved?'Secret Key 已保存，Site Key 未确认保存，请重试。':'')+err.message;await loadState().catch(()=>{});}
+    if(secret){await api('credentials',{turnstile_secret:secret});secretSaved=true;if(session!==csrf)return;form.elements.turnstile_secret.value='';}
+    await api('settings',{...settings,turnstile_sitekey:sitekey});configSaved=true;if(session!==csrf)return;
+    form.dataset.dirty='';invalidatePlan();await loadState();if(session!==csrf)return;feedback.textContent='人类验证配置已保存';
+  }catch(err){if(session!==csrf)return;feedback.textContent=(configSaved?'配置已保存，但状态刷新失败，请刷新页面确认。':secretSaved?'Secret Key 已保存，Site Key 未确认保存，请重试。':'')+err.message;await loadState().catch(()=>{});}
   finally{unlockForm(form);}
 };
-$('#password-form').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,feedback=$('#password-feedback');if(form.dataset.busy)return;const values=Object.fromEntries(new FormData(form));feedback.textContent='';lockForm(form);try{await api('password',values);form.reset();setLocalSecurity('');showAuth();toast('密码已修改，请重新登录')}catch(err){setLocalSecurity('password');feedback.textContent=err.message}finally{unlockForm(form)}};
+$('#password-form').onsubmit=async e=>{e.preventDefault();const session=csrf,form=e.currentTarget,feedback=$('#password-feedback');if(form.dataset.busy)return;const values=Object.fromEntries(new FormData(form));feedback.textContent='';lockForm(form);try{await api('password',values);if(session!==csrf)return;form.reset();setLocalSecurity('');showAuth();toast('密码已修改，请重新登录')}catch(err){if(session!==csrf)return;setLocalSecurity('password');feedback.textContent=err.message}finally{unlockForm(form)}};
 $('#site-form').onchange=updateSiteControls;
-$('#site-form').onsubmit=async e=>{e.preventDefault();const f=e.target;const data=Object.fromEntries(new FormData(f));data.protocols=selectedProtocols(f);delete data.protocol_http;delete data.protocol_websocket;if(!data.protocols.length){$('#site-error').textContent='请至少选择一种转发协议';return;}for(const k of ['enabled','human_check','passcode_required'])data[k]=f.elements[k].checked;for(const k of ['allowed_countries','allowed_ips'])data[k]=data[k].split(/[,，\s]+/).filter(Boolean);for(const k of ['requests_per_minute','session_minutes'])data[k]=Number(data[k]);lockForm(f);try{const result=await action(e.submitter,'sites',null,data);toast(result.publication?.status==='failed'?'网站已保存，自动发布失败；请查看发布提示':result.publication?.status==='published'?'网站已保存并发布，云端核验通过':'网站配置已生效',result.publication?.status==='failed');f.elements.passcode.value='';$('#site-dialog').close();invalidatePlan()}catch(err){$('#site-error').textContent=err.message}finally{unlockForm(f);}};
+$('#site-form').onsubmit=async e=>{e.preventDefault();const session=csrf,f=e.target;const data=Object.fromEntries(new FormData(f));data.background=true;data.protocols=selectedProtocols(f);delete data.protocol_http;delete data.protocol_websocket;if(!data.protocols.length){$('#site-error').textContent='请至少选择一种转发协议';return;}for(const k of ['enabled','human_check','passcode_required'])data[k]=f.elements[k].checked;for(const k of ['allowed_countries','allowed_ips'])data[k]=data[k].split(/[,，\s]+/).filter(Boolean);for(const k of ['requests_per_minute','session_minutes'])data[k]=Number(data[k]);lockForm(f);try{const result=await action(e.submitter,'sites',null,data);if(session!==csrf)return;toast(result.publication?.status==='queued'?'配置已保存，正在后台发布':result.publication?.status==='failed'?'网站已保存，自动发布失败；请查看发布提示':result.publication?.status==='published'?'网站已保存并发布，云端核验通过':'网站配置已生效',result.publication?.status==='failed');f.elements.passcode.value='';$('#site-dialog').close();invalidatePlan()}catch(err){if(session===csrf)$('#site-error').textContent=err.message}finally{unlockForm(f);if(state)renderActionAvailability();}};
 for(const [id,path,msg] of [['connector-start','connector/start','连接器已启动'],['connector-stop','connector/stop','连接器已停止']])$('#'+id).onclick=async e=>{try{await action(e.currentTarget,path,msg)}catch{}};
 $('#overview-cf-check').onclick=$('#cf-check').onclick=async e=>{
   const button=e.currentTarget;if(button.dataset.busy||cloudCheck.pending)return;
@@ -690,9 +693,9 @@ $('#overview-cf-check').onclick=$('#cf-check').onclick=async e=>{
   catch(err){if(session===csrf&&state&&state.settings.tunnel_id===tunnel){cloudCheck={pending:false,error:err.message,tunnel};renderCloudConnection();}}
   finally{for(const id of ['cf-check','overview-cf-check'])$('#'+id).dataset.busy='';if(state)renderActionAvailability();}
 };
-$('#widget-create').onclick=async e=>{
+$('#widget-create').onclick=async e=>{const session=csrf;
   try{
-    const result=await action(e.currentTarget,'cloudflare/turnstile-auto',null,{});
+    const result=await action(e.currentTarget,'cloudflare/turnstile-auto',null,{});if(session!==csrf)return;
     if(['preparing','authorizing','creating'].includes(result.phase)){go('settings');$('#browser-authorize').scrollIntoView({behavior:'smooth',block:'center'});}
     else toast('人类验证已自动配置，可继续预览并发布网站');
   }catch{}
@@ -714,30 +717,30 @@ function renderRoutePlan(value){
 let publicationRetryPending=false;
 $('#publication-retry').onclick=async e=>{
   if(publicationRetryPending)return;
-  const button=e.currentTarget,feedback=$('#publish-feedback');
+  const session=csrf,button=e.currentTarget,feedback=$('#publish-feedback');
   publicationRetryPending=true;button.dataset.busy='true';button.disabled=true;invalidatePlan();
   feedback.hidden=false;feedback.textContent='正在检查并重新发布…';
-  try{const checked=await api('cloudflare/preview',{});await api('cloudflare/apply',{revision:checked.revision});feedback.textContent='网站路由已发布并通过核验';}
-  catch(err){feedback.textContent='发布未完成：'+err.message;}
+  try{const checked=await api('cloudflare/preview',{});if(session!==csrf)return;await api('cloudflare/apply',{revision:checked.revision});if(session!==csrf)return;feedback.textContent='网站路由已发布并通过核验';}
+  catch(err){if(session!==csrf)return;feedback.textContent='发布未完成：'+err.message;}
   finally{publicationRetryPending=false;delete button.dataset.busy;await loadState().catch(()=>{});if(state)renderActionAvailability();}
 };
 $('#plan-cancel').onclick=()=>invalidatePlan();
 $('#preview').onclick=async e=>{
-  const button=e.currentTarget;
+  const session=csrf,button=e.currentTarget;
   if(publicationRetryPending||button.dataset.busy)return;
   publicationRetryPending=true;invalidatePlan();const feedback=$('#publish-feedback');
   feedback.hidden=false;feedback.textContent='正在检查 Cloudflare 路由与 DNS…';
   try{
-    plan=await action(button,'cloudflare/preview');
+    const checked=await action(button,'cloudflare/preview');if(session!==csrf)return;plan=checked;
     if(!plan.routes_changed&&!(plan.dns||[]).some(record=>record.create)){
       // This unchanged snapshot is read back and recorded without cloud writes.
-      await action(button,'cloudflare/apply',null,{revision:plan.revision});
+      await action(button,'cloudflare/apply',null,{revision:plan.revision});if(session!==csrf)return;
       invalidatePlan();feedback.textContent='检查完成：云端路由与当前网站配置一致，无需发布。';
     }else{renderRoutePlan(plan);feedback.hidden=true;}
-  }catch(err){invalidatePlan();feedback.textContent=err.message;}
+  }catch(err){if(session!==csrf)return;invalidatePlan();feedback.textContent=err.message;}
   finally{publicationRetryPending=false;if(state)renderActionAvailability();}
 };
-$('#apply').onclick=async e=>{if(!plan||publicationRetryPending)return;const feedback=$('#publish-feedback');feedback.hidden=false;feedback.textContent='正在发布并核验…';try{await action(e.currentTarget,'cloudflare/apply',null,{revision:plan.revision});invalidatePlan();feedback.textContent='网站路由已发布并通过核验';}catch(err){invalidatePlan();feedback.textContent=err.message;}};
+$('#apply').onclick=async e=>{if(!plan||publicationRetryPending)return;const session=csrf,feedback=$('#publish-feedback');feedback.hidden=false;feedback.textContent='正在发布并核验…';try{await action(e.currentTarget,'cloudflare/apply',null,{revision:plan.revision});if(session!==csrf)return;invalidatePlan();feedback.textContent='网站路由已发布并通过核验';}catch(err){if(session!==csrf)return;invalidatePlan();feedback.textContent=err.message;}};
 api('bootstrap').then(r=>{initialized=r.initialized;csrf=r.csrf;remoteAccess=r.remote===true;publicClientEnabled=r.public_client_enabled!==false;renderPublicClientSetting();window.LB_REMOTE=remoteAccess;window.localLoginUI?.setRemote?.(remoteAccess);document.body.classList.toggle('remote-management',remoteAccess);if(remoteAccess)document.querySelectorAll('.remote-only').forEach(el=>el.hidden=false);if(r.authenticated)openShell();else showAuth()}).catch(e=>$('#auth-error').textContent=e.message).finally(()=>document.body.classList.remove('auth-pending'));
 let automaticStateRefresh=null;
 function pollState(){
@@ -765,34 +768,34 @@ function renderConnectorMaintenance(){
 }
 async function prepareConnector(custom){
  if(connectorUpdateBusy||remoteAccess)return;
- const input=$('#cloudflared-path'),feedback=$('#connector-update-feedback');
+ const session=csrf,input=$('#cloudflared-path'),feedback=$('#connector-update-feedback');
  if(custom&&!input.value.trim())return;
  connectorUpdateBusy=true;renderConnectorMaintenance();
  feedback.textContent=custom?'正在验证指定程序…':'正在安装 Cloudflared…';
  try{
   const result=await api('connector/ensure',{path:custom?input.value.trim():''});
-  input.value=result.path;connectorUpdate=null;
-  await loadState();
+  if(session!==csrf)return;input.value=result.path;connectorUpdate=null;
+  await loadState();if(session!==csrf)return;
   feedback.textContent=(custom?'指定程序已验证并使用':'Cloudflared 已安装')+' '+result.version;
- }catch(err){feedback.textContent=err.message;}
+ }catch(err){if(session!==csrf)return;feedback.textContent=err.message;}
  finally{connectorUpdateBusy=false;renderConnectorMaintenance();}
 }
 $('#connector-ensure').onclick=()=>prepareConnector(false);
 $('#connector-use-path').onclick=()=>prepareConnector(true);
-$('#connector-check-update').onclick=async()=>{
+$('#connector-check-update').onclick=async()=>{const session=csrf;
  if(connectorUpdateBusy)return;
  connectorUpdateBusy=true;connectorUpdate=null;renderConnectorMaintenance();
  const feedback=$('#connector-update-feedback');feedback.textContent='正在检查官方版本…';
- try{connectorUpdate=await api('connector/check-update',{});feedback.textContent=connectorUpdate.available?(remoteAccess?'有新版本，请在本机管理台更新。':'有新版本可用'):'当前已是最新版本';}
- catch(err){feedback.textContent=err.message;}
+ try{const checked=await api('connector/check-update',{});if(session!==csrf)return;connectorUpdate=checked;feedback.textContent=connectorUpdate.available?(remoteAccess?'有新版本，请在本机管理台更新。':'有新版本可用'):'当前已是最新版本';}
+ catch(err){if(session!==csrf)return;feedback.textContent=err.message;}
  finally{connectorUpdateBusy=false;renderConnectorMaintenance();}
 };
-$('#connector-update').onclick=async()=>{
+$('#connector-update').onclick=async()=>{const session=csrf;
  if(connectorUpdateBusy||!connectorUpdate||remoteAccess)return;
  connectorUpdateBusy=true;renderConnectorMaintenance();
  const feedback=$('#connector-update-feedback');feedback.textContent='正在下载并校验；完成后将切换连接器…';
- try{const result=await api('connector/update',{version:connectorUpdate.latest});$('#cloudflared-path').value=result.path;connectorUpdate=null;await loadState();feedback.textContent='更新完成'+(result.running_restored?'，连接器已恢复运行。':'。');}
- catch(err){feedback.textContent=err.message+'。可检查状态后重试。';}
+ try{const result=await api('connector/update',{version:connectorUpdate.latest});if(session!==csrf)return;$('#cloudflared-path').value=result.path;connectorUpdate=null;await loadState();if(session!==csrf)return;feedback.textContent='更新完成'+(result.running_restored?'，连接器已恢复运行。':'。');}
+ catch(err){if(session!==csrf)return;feedback.textContent=err.message+'。可检查状态后重试。';}
  finally{connectorUpdateBusy=false;renderConnectorMaintenance();}
 };
 
@@ -801,25 +804,89 @@ $('#write-token-cancel').onclick=()=>{setAccountAccess('browser');const input=$(
 
 
 function locateTunnelToken(){
-  go('settings');const details=$('#tunnel-maintenance');details.open=true;details.scrollIntoView({behavior:'smooth',block:'center'});$('#tunnel-token-refresh').focus({preventScroll:true});
+  go('settings');$('#account-config-details').open=true;const details=$('#tunnel-maintenance');details.open=true;details.scrollIntoView({behavior:'smooth',block:'center'});$('#tunnel-token-refresh').focus({preventScroll:true});
 }
 $('#tunnel-token-refresh').onclick=async e=>{
+  const session=csrf;
   const feedback=$('#tunnel-token-feedback');feedback.className='form-feedback';feedback.textContent='正在从 Cloudflare 获取隧道令牌…';
-  try{await action(e.currentTarget,'cloudflare/create-tunnel');feedback.textContent=state.connector.running?'令牌已保存。请到网站转发停止并重新启动连接器，新令牌才会生效。':'令牌已保存，可到网站转发启动连接器。';}
-  catch(err){feedback.className='form-feedback error';feedback.textContent=err.message;await loadState().catch(()=>{});}
+  try{await action(e.currentTarget,'cloudflare/create-tunnel');if(session!==csrf||!state)return;feedback.textContent=state.connector.running?'令牌已保存。请到网站转发停止并重新启动连接器，新令牌才会生效。':'令牌已保存，可到网站转发启动连接器。';}
+  catch(err){if(session!==csrf)return;feedback.className='form-feedback error';feedback.textContent=err.message;}
 };
 $('#create-tunnel').onclick=async e=>{
+  const session=csrf;
   if(state.settings.tunnel_id)return locateTunnelToken();
   const feedback=$('#tunnel-feedback'), help=$('#tunnel-permission-help');
   feedback.hidden=false;feedback.className='form-feedback';feedback.textContent=state.settings.tunnel_id?'正在获取连接令牌…':state.tunnel_pending?'正在核对并恢复上次创建结果…':'正在创建隧道…';help.hidden=true;
-  try{await action(e.currentTarget,'cloudflare/create-tunnel');feedback.textContent='连接令牌已保存，可启动连接器。';}
-  catch(err){feedback.className='form-feedback error';feedback.textContent=err.message;help.hidden=!err.message.includes('HTTP 403');await loadState().catch(()=>{});}
+  try{await action(e.currentTarget,'cloudflare/create-tunnel');if(session!==csrf)return;feedback.textContent='连接令牌已保存，可启动连接器。';}
+  catch(err){if(session!==csrf)return;feedback.className='form-feedback error';feedback.textContent=err.message;help.hidden=!err.message.includes('HTTP 403');}
 };
 
+function permissionRecovery(current){
+  const issues=current.cloudflare_permission_issues||[],kind=current.token_management?.managed?.kind;
+  const oauth=kind==='oauth'&&issues.some(issue=>issue.credential!=='cf_read_token');
+  const domain=issues.some(issue=>issue.detail?.includes('创建域名区域'));
+  return {oauth,repair:kind!=='account'&&!oauth,
+    replace:!oauth||issues.some(issue=>issue.credential==='cf_read_token'),
+    credential:(oauth||issues.every(issue=>issue.credential==='cf_read_token'))?'cf_read_token':'cf_write_token',domain,
+    guide:issues.length&&issues.every(issue=>issue.status==='needs_recheck')?'凭据已更新，请重试原操作验证；历史失败记录不代表当前授权仍然失败。':oauth?'Cloudflare 拒绝了上次操作，请核对账户角色与授权资源范围。若需要补充权限，可重新浏览器授权后重试。':'请修复或更换失败操作使用的 API Token，再重试原操作。'};
+}
+function renderPermissionRecovery(){
+  const recovery=permissionRecovery(state),local=!remoteAccess&&state.access_scope!=='sites';
+  const issues=state.cloudflare_permission_issues||[],updated=issues.length>0&&issues.every(issue=>issue.status==='needs_recheck');
+  $('#permission-authorize').hidden=!local||updated||!recovery.oauth;
+  $('#permission-repair').hidden=!local||updated||!recovery.repair;
+  $('#permission-replace').hidden=!local||updated||!recovery.replace;
+  $('#account-permission-dismiss').hidden=!local||!updated||!recovery.domain;
+  $('#account-permission-retry').hidden=!local||!updated;
+  $('#account-permission-retry').textContent=recovery.domain?'返回域名接入 →':'返回原操作 →';
+  $('#permission-retry').hidden=!local;
+  $('#permission-retry').textContent='前往 Cloudflare 账户与域名 →';
+  $('#cloudflare-permission-guide').textContent=recovery.guide;
+}
+function chooseAuthorizationBrowser(){
+  go('settings');
+  $('#account-config-details').open=true;
+  setAccountAccess('browser');
+  const select=$('#cloudflare-browser');
+  select.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'});
+  select.focus({preventScroll:true});
+}
+$('#account-permission-dismiss').onclick=async e=>{
+  const issue=(state.cloudflare_permission_issues||[]).find(issue=>issue.detail?.includes('创建域名区域'));
+  if(!issue)return;
+  try{await action(e.currentTarget,'domain-onboarding/dismiss-error',null,{checked_at:issue.checked_at},{inlineError:true});}
+  catch(err){$('#cloudflare-permission-guide').textContent=err.message;}
+};
+$('#account-permission-retry').onclick=()=>{
+  const recovery=permissionRecovery(state);go(recovery.domain?'settings':'sites');
+  if(recovery.domain){const section=$('#domain-onboarding');revealControl(section);if(section.tagName==='DETAILS')section.open=true;section.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});}
+};
+$('#permission-authorize').onclick=chooseAuthorizationBrowser;
+$('#permission-repair').onclick=()=>locateTokenManager();
+$('#permission-replace').onclick=()=>locateSetup(permissionRecovery(state).credential);
+$('#permission-retry').onclick=()=>{
+  go('settings');
+  const section=$('#cloudflare-account-panel');
+  section.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});
+};
+function permissionErrorDetails(issue){
+  const detail=String(issue.detail||''),operation=detail.match(/：([^（\n]+?)失败/),status=Number(issue.http_status)||Number(detail.match(/HTTP (\d{3})/)?.[1]);
+  const codes=detail.match(/错误码 ([0-9,]+)/)?.[1];
+  return '<p>失败操作：'+esc(operation?operation[1].trim().slice(0,80):'Cloudflare 操作')+'<br>返回结果：'+(status?'HTTP '+status:'未记录')+(codes?'，错误码 '+esc(codes):'')+'<br><small>发生时间：'+esc(new Date(issue.checked_at*1000).toLocaleString('zh-CN'))+'</small></p>';
+}
 function renderPermissionIssues(){
   const issues=state.cloudflare_permission_issues||[];
-  $('#cloudflare-permission-alert').hidden=!issues.length;
-  $('#cloudflare-permission-details').innerHTML=issues.map(issue=>'<p>'+ (issue.status==='needs_recheck'?'凭据已更新，需重试原操作验证。上次记录：':'上次操作失败记录：')+esc(issue.detail)+'<br><small>上次失败：'+new Date(issue.checked_at*1000).toLocaleString('zh-CN')+'</small></p>').join('');
+  renderPermissionRecovery();
+  $('#cloudflare-permission-alert').hidden=!issues.length||currentView==='settings';
+  $('#account-permission-notice').hidden=!issues.length;
+  const updated=issues.length&&issues.every(issue=>issue.status==='needs_recheck');
+  const domainOnly=issues.length&&issues.every(issue=>issue.detail?.includes('创建域名区域'));
+  $('#account-permission-notice').className='notice'+(updated?'':' permission-alert');
+  $('#cloudflare-permission-alert').className='notice'+(updated?'':' permission-alert');
+  if(domainOnly&&updated)$('#cloudflare-permission-guide').textContent='授权已完成。你可以继续接入新域名，或选择暂不接入；已有域名无需重新接入。';
+  $('#account-permission-title').textContent=domainOnly?(updated?'授权已更新，可继续接入新域名':'新域名接入失败，请核对权限'):(updated?'凭据已更新，请重试原操作':'Cloudflare 操作失败，请核对权限');
+  $('#cloudflare-permission-details').textContent=updated?'凭据已更新，请在 Cloudflare 账户与域名中重试原操作验证。':'Cloudflare 操作失败，请在 Cloudflare 账户与域名中查看处理说明。';
+  $('#account-permission-details').innerHTML=issues.map(permissionErrorDetails).join('');
   $('#credentials-form [name=cf_write_token]').closest('label').classList.toggle('permission-field-error',issues.some(issue=>issue.credential==='cf_write_token'&&issue.status!=='needs_recheck'));
   $('#read-token-save').form.elements.cf_read_token.closest('label').classList.toggle('permission-field-error',issues.some(issue=>issue.credential==='cf_read_token'&&issue.status!=='needs_recheck'));
 }
@@ -839,12 +906,13 @@ function locateTokenManager(){
 }
 
 async function startBrowserAuthorization(button){
+  const session=csrf;
   browserAuthInteraction=true;
   go('settings');
   $('#account-config-details').open=true;
   $('#browser-authorize').scrollIntoView({behavior:'smooth',block:'center'});
   try{await action(button,'cloudflare/browser-authorize',null,{browser:$('#cloudflare-browser').value});}
-  catch(err){$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+  catch(err){if(session!==csrf)return;$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
 }
 
 async function loadCloudflareBrowsers(){
@@ -856,12 +924,45 @@ async function loadCloudflareBrowsers(){
     select.value=result.browsers.some(browser=>browser.id===saved)?saved:'default';
   }catch{}
 }
-$('#cloudflare-browser').onchange=()=>{try{localStorage.setItem('lb-cloudflare-browser',$('#cloudflare-browser').value);}catch{}};
+async function changeAuthorizationBrowser(){
+ const select=$('#cloudflare-browser');
+ try{localStorage.setItem('lb-cloudflare-browser',select.value);}catch{}
+ if(state?.browser_auth?.phase==='authorizing'&&select.value!==(state.browser_auth.browser||'default')){
+   select.disabled=true;
+   try{await recoverBrowserAuthorization($('#browser-authorize-restart'),'restart');}
+   finally{if(state)renderBrowserAuth();else select.disabled=false;}
+ }
+}
+$('#cloudflare-browser').onchange=changeAuthorizationBrowser;
 loadCloudflareBrowsers();
+function renderOAuthRefresh(active){
+ const issue=state.oauth_refresh,notice=$('#oauth-renewal-notice'),local=!remoteAccess&&state.access_scope!=='sites';
+ notice.hidden=!issue;
+ $('#oauth-renewal-title').textContent=issue?.phase==='warning'?'Cloudflare 自动续期暂未完成':'Cloudflare 云端管理暂不可用';
+ $('#oauth-renewal-message').textContent=issue?.message||'';
+ $('#oauth-renewal-reauthorize').hidden=!issue?.retry_failed;
+ $('#oauth-renewal-actions').hidden=!local;
+ $('#oauth-renewal-local-note').hidden=local;
+ $('#oauth-renewal-retry').disabled=active||!!$('#oauth-renewal-retry').dataset.busy;
+ $('#oauth-renewal-retry').textContent=$('#oauth-renewal-retry').dataset.busy?'正在续期…':'重试续期';
+ if(!issue){$('#oauth-renewal-feedback').textContent='';$('#oauth-renewal-feedback').hidden=true;}
+ else $('#oauth-renewal-feedback').hidden=!local||!$('#oauth-renewal-feedback').textContent;
+}
+$('#oauth-renewal-retry').onclick=async event=>{
+ const session=csrf,button=event.currentTarget,feedback=$('#oauth-renewal-feedback');
+ if(button.dataset.busy)return;
+ feedback.textContent='正在重试续期，请稍候';feedback.className='form-feedback';feedback.hidden=false;
+ button.textContent='正在续期…';
+ try{await action(button,'cloudflare/browser-authorize-refresh',null,{},{inlineError:true});if(session===csrf)toast('Cloudflare 管理授权续期成功');}
+ catch(error){if(session===csrf){const issue=state?.oauth_refresh;feedback.textContent=['network','timeout'].includes(issue?.reason)?'续期仍未完成，请稍后重试':issue?.retry_failed?(['invalid_grant','invalid_client'].includes(issue.reason)?'续期仍未完成，请点击“重新授权”恢复云端管理。':'续期仍未完成，可再次重试或重新授权。'):'续期请求未完成：'+error.message;feedback.className='form-feedback error';feedback.hidden=false;}}
+ finally{if(session===csrf)button.textContent='重试续期';}
+};
 let browserAuthPoll;
 let browserAuthInteraction=false;
 function browserAuthMessage(job){
+  if(job.phase==='done'&&!browserAuthInteraction)return '';
   const messages={idle:'',preparing:'正在准备浏览器授权…',creating:'正在核验权限并完成配置…',cancelling:'正在取消授权…',cancelled:'本次授权已取消，已有配置保持不变。',done:'本次授权已完成，配置已保存。'};
+  if(job.authorization_saved&&['creating','done'].includes(job.phase))return job.message;
   if(job.phase!=='authorizing')return messages[job.phase]??job.message;
   const message='请在浏览器中确认授权。';
   if(!Number.isFinite(job.updated_at))return message;
@@ -873,9 +974,10 @@ function accountConfiguration(current){
  const cfg=current.settings||{},credentials=current.credentials||{},zones=configuredZones(current);
  const missing=[];if(!cfg.account_id)missing.push('Account ID');if(!zones.length)missing.push('域名');if(!credentials.cf_write_token)missing.push('管理凭据');
  const ready=missing.length===0,issues=(current.cloudflare_permission_issues||[]).filter(issue=>issue.credential!=='cf_read_token');
+ const updated=issues.length>0&&issues.every(issue=>issue.status==='needs_recheck');
  const hasAny=!!(cfg.account_id||cfg.zone_id||cfg.zone_name||credentials.cf_write_token);
- return {ready,label:!ready?(hasAny?'配置不完整':'未配置'):issues.length?'凭据待检查':current.token_management?.managed?.kind==='oauth'?'已连接':'已配置',
-  detail:!ready?'缺少：'+missing.join('、'):'已接入 '+zones.length+' 个域名'+(issues.length?' · 请检查管理凭据权限':''),attention:!ready||issues.length>0};
+ return {ready,label:current.oauth_refresh?'管理授权待续期':!ready?(hasAny?'配置不完整':'未配置'):issues.length?(updated?'待重试验证':'凭据待检查'):current.token_management?.managed?.kind==='oauth'?'已连接':'已配置',
+  detail:!ready?'缺少：'+missing.join('、'):'已接入 '+zones.length+' 个域名'+(issues.length?(updated?' · 授权已更新，待重试验证':' · 请检查管理凭据权限'):''),attention:!ready||issues.length>0||!!current.oauth_refresh};
 }
 function setAccountAccess(mode){
  const manual=mode==='manual';
@@ -885,16 +987,17 @@ function setAccountAccess(mode){
  $('#account-use-manual').ariaPressed=String(manual);
 }
 function renderAccountConfiguration(active){
+ globalThis.domainOnboardingUI?.renderAccess();
  const info=accountConfiguration(state),details=$('#account-config-details');
  $('#account-config-status').textContent=info.label;
  $('#account-config-status').className='badge '+(info.attention?'neutral':'success');
  $('#account-config-summary').textContent=info.detail;
  const zones=configuredZones(state);
- $('#configured-zones').innerHTML=zones.map(z=>`<div class="configured-zone"><span>${esc(z.zone_name)}</span>${z.zone_id===state.settings.zone_id?'<span class="small muted">默认域名</span>':`<button type="button" class="text-button" data-remove-zone="${esc(z.zone_id)}">移除</button>`}</div>`).join('');
+ $('#configured-zones').innerHTML=zones.map(z=>`<div class="configured-zone"><span>${esc(z.zone_name)}</span><div class="configured-zone-actions">${z.zone_id===state.settings.zone_id?'<span class="small muted">默认域名</span>':`<button type="button" class="text-button" data-default-zone="${esc(z.zone_id)}" aria-label="将 ${esc(z.zone_name)} 设为默认">设为默认</button>`}<button type="button" class="text-button" data-remove-zone="${esc(z.zone_id)}" aria-label="移除 ${esc(z.zone_name)}">移除</button></div></div>`).join('');
  $('#zones-discover').disabled=!state.settings.account_id||!state.credentials.cf_write_token||!!$('#zones-discover').dataset.busy;
  $('#zones-discover').hidden=!zones.length||!state.settings.account_id||!state.credentials.cf_write_token;
  if($('#zones-discover').hidden)$('#zone-management').hidden=true;
- $('#account-config-toggle').textContent=info.ready?'修改接入方式':'完成接入';
+ $('#account-config-toggle').textContent='Cloudflare 授权与连接';
  const key=String(info.ready);
  if(details.dataset.ready!==key&&!$('#settings-form').dataset.dirty){details.open=!info.ready;details.dataset.ready=key;}
  const phase=state.browser_auth?.phase||'idle';
@@ -903,9 +1006,18 @@ function renderAccountConfiguration(active){
  details.dataset.authPhase=phase;
  if(active){details.open=true;setAccountAccess('browser');}
 }
+function renderBrowserAuthErrorTime(job){
+  const time=$('#browser-auth-error-time'),stamp=Number(job.updated_at),date=new Date(stamp*1000);
+  time.hidden=job.phase!=='error'||!Number.isFinite(stamp)||stamp<=0||!Number.isFinite(date.getTime());
+  time.textContent=time.hidden?'':'发生时间：'+date.toLocaleString('zh-CN',{hour12:false});
+}
 function renderBrowserAuth(){
   const job=state.browser_auth||{phase:"idle",message:"在浏览器授权后自动接入 Cloudflare。"},active=["preparing","authorizing","choosing_zone","creating","cancelling"].includes(job.phase);
   renderAccountConfiguration(active);
+  $('#browser-setup-retry').hidden=job.phase!=='error'||job.next_action!=='configure_tunnel';
+  $('#browser-setup-retry').disabled=active||!!$('#browser-setup-retry').dataset.busy;
+  renderBrowserAuthErrorTime(job);
+  if(typeof renderOAuthRefresh==='function')renderOAuthRefresh(active);
   $("#browser-auth-status").textContent=job.phase==='cancelled'&&!browserAuthInteraction?'':browserAuthMessage(job);
   $("#browser-auth-status").className="form-feedback"+(job.phase==="error"?" error":"");
   for(const button of document.querySelectorAll('#browser-authorize, [data-browser-authorize]')){
@@ -920,6 +1032,7 @@ function renderBrowserAuth(){
   }
   const controls=[$('#browser-authorize-restart'),$('#browser-authorize-cancel')];
   const recoveryBusy=controls.some(button=>!!button.dataset.busy);
+  $('#cloudflare-browser').disabled=['preparing','creating','choosing_zone','cancelling'].includes(job.phase)||recoveryBusy;
   $('#browser-authorize-restart').hidden=job.phase!=='authorizing'&&job.phase!=='cancelling';
   $('#browser-authorize-cancel').hidden=!['authorizing','choosing_zone','cancelling'].includes(job.phase);
   for(const button of controls)button.disabled=!['authorizing','choosing_zone'].includes(job.phase)||recoveryBusy;
@@ -929,16 +1042,24 @@ function renderBrowserAuth(){
 $('#account-use-browser').onclick=()=>setAccountAccess('browser');
 $('#account-use-manual').onclick=()=>{replacingWriteToken=!!state?.credentials.cf_write_token;setAccountAccess('manual');renderSetup();};
 $("#browser-authorize").onclick=e=>startBrowserAuthorization(e.currentTarget);
+$('#browser-setup-retry').onclick=async e=>{
+ browserAuthInteraction=true;
+ const session=csrf;
+ try{await action(e.currentTarget,'cloudflare/browser-authorize-setup',null,{});}
+ catch(err){if(session!==csrf)return;$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+};
 $('#browser-zone-confirm').onclick=async e=>{
+ const session=csrf;
  const button=e.currentTarget;if(button.dataset.busy)return;
  try{await action(button,'cloudflare/browser-authorize-select-zone',null,{zone_id:$('#browser-zone-select').value});}
- catch(err){$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+ catch(err){if(session!==csrf)return;$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
 };
 async function recoverBrowserAuthorization(button,operation){
+  const session=csrf;
   browserAuthInteraction=true;
   if(button.dataset.busy||[$('#browser-authorize-restart'),$('#browser-authorize-cancel')].some(control=>!!control.dataset.busy))return;
   try{await action(button,'cloudflare/browser-authorize-'+operation,null,operation==='restart'?{browser:$('#cloudflare-browser').value}:{});}
-  catch(err){$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
+  catch(err){if(session!==csrf)return;$('#browser-auth-status').textContent=err.message;$('#browser-auth-status').className='form-feedback error';}
 }
 $('#browser-authorize-restart').onclick=e=>recoverBrowserAuthorization(e.currentTarget,'restart');
 $('#browser-authorize-cancel').onclick=e=>recoverBrowserAuthorization(e.currentTarget,'cancel');
@@ -980,7 +1101,7 @@ function renderTokenManager(){
 
 }
 $('#token-manager-form').onsubmit=async e=>{
-  e.preventDefault();const form=e.currentTarget,feedback=$('#token-manager-feedback');
+  e.preventDefault();const session=csrf,form=e.currentTarget,feedback=$('#token-manager-feedback');
   if(form.dataset.busy)return;
   if(!$('#token-operation').value||$('#token-operation').value==='read-existing')return;
   const authority=form.elements.authority.value.trim();
@@ -989,11 +1110,11 @@ $('#token-manager-form').onsubmit=async e=>{
   if(button.disabled){feedback.textContent=button.title||'当前操作不可用，请检查账户配置与令牌状态。';return;}
   const data={authority,remember:form.elements.remember.checked,human_check:form.elements.human_check.checked,target,repair_existing,force_new:button.dataset.new==='true'};
   form.dataset.busy='true';lockForm(form);renderTokenManager();feedback.className='form-feedback';feedback.textContent='正在核对并配置'+(target==='read'?'只读':'写入')+'令牌，请稍候…';
-  try{const result=await action(button,'cloudflare/provision-token',null,data);form.elements.authority.value='';form.dataset.dirty='';replacingWriteToken=false;invalidatePlan();if(state){renderSetup();renderTokenManager();}const name=target==='read'?'只读令牌':'写入令牌';feedback.textContent=result.action==='created'?name+'已创建并保存':name+'权限已更新，请重试失败的操作。';}
-  catch(err){form.elements.authority.value='';feedback.className='form-feedback error';feedback.textContent=err.message;await loadState().catch(()=>{});}
+  try{const result=await action(button,'cloudflare/provision-token',null,data);if(session!==csrf)return;form.elements.authority.value='';form.dataset.dirty='';replacingWriteToken=false;invalidatePlan();if(state){renderSetup();renderTokenManager();}const name=target==='read'?'只读令牌':'写入令牌';feedback.textContent=result.action==='created'?name+'已创建并保存':name+'权限已更新，请重试失败的操作。';}
+  catch(err){if(session!==csrf)return;form.elements.authority.value='';feedback.className='form-feedback error';feedback.textContent=err.message;}
   finally{form.dataset.busy='';unlockForm(form);if(state)renderTokenManager();}
 };
-$('#token-manager-forget').onclick=async e=>{try{await action(e.currentTarget,'cloudflare/forget-token-authority');$('#token-manager-feedback').textContent='本机授权令牌已移除，业务令牌仍可使用。';}catch(err){$('#token-manager-feedback').textContent=err.message;}};
+$('#token-manager-forget').onclick=async e=>{const session=csrf;try{await action(e.currentTarget,'cloudflare/forget-token-authority');if(session!==csrf)return;$('#token-manager-feedback').textContent='本机授权令牌已移除，业务令牌仍可使用。';}catch(err){if(session!==csrf)return;$('#token-manager-feedback').textContent=err.message;}};
 
 $('#token-manager-form').oninput=e=>{e.currentTarget.dataset.dirty='true';};
 
@@ -1029,12 +1150,14 @@ $('#forwarding-next').onclick=()=>{
 function navigationIssues(current){
   const issues={overview:[],sites:[],audit:[],settings:[],interfaces:[]};
   const cfg=current.settings,enabled=current.sites.filter(site=>site.enabled);
+  const backgroundPublishing=['queued','verification','publishing'].includes(current.site_publication?.phase);
+  if(current.domain_onboarding?.phase==='preview')issues.settings.push('新域名尚未切换 DNS，请查看域名接入预览并确认');
   const missing=current.cloudflare_setup?.missing||[];
   if(!current.cloudflare_setup?.ready){
     issues.settings.push('账户配置未完成：'+missing.join('、'));
   }
   for(const issue of current.cloudflare_permission_issues||[]){
-    if(issue.status!=='needs_recheck')issues.settings.push('上次操作失败，待重试核验：'+issue.detail);
+    if(issue.status!=='needs_recheck')issues.settings.push('Cloudflare 操作失败，请前往账户与域名核对权限');
   }
   if(current.token_management?.error)issues.settings.push(current.token_management.error.detail);
   if(current.token_management?.pending)issues.settings.push('业务令牌创建结果未知，请在 Cloudflare 核对后接入，勿重复创建');
@@ -1047,13 +1170,13 @@ function navigationIssues(current){
     const probe=current.site_probes?.[site.id];
     if(probe?.reachable===false&&probe.origin===site.origin)issues.sites.push(site.name+'：上次源站检查不可达，请检查局域网地址并重新检查');
   }
-  if(cfg.tunnel_id&&Array.isArray(current.published_hosts)){
+  if(cfg.tunnel_id&&Array.isArray(current.published_hosts)&&!backgroundPublishing){
     const desired=enabled.map(site=>site.hostname).sort(),published=[...current.published_hosts].sort();
     if(JSON.stringify(desired)!==JSON.stringify(published)){
       issues.sites.push('网站有待发布变更，请重试发布');
     }
   }
-  if(current.publication_needs_review){
+  if(current.publication_needs_review&&!backgroundPublishing){
     issues.sites.push('上次发布未完成或核验失败，请检查并重试');
   }
   const edge=current.cloudflare;
@@ -1061,8 +1184,26 @@ function navigationIssues(current){
   issues.overview=[...new Set(['settings','sites','audit'].flatMap(view=>issues[view]))];
   return issues;
 }
+let sitePublicationPoll=null;
+function renderSitePublication(){
+  const job=state?.site_publication,active=job&&['queued','verification','publishing'].includes(job.phase);
+  $('#site-publication-notice').hidden=!job;
+  $('#site-publication-message').textContent=job?.message||'';
+  $('#site-publication-retry').hidden=job?.phase!=='failed';
+  $('#site-publication-retry').disabled=!!active;
+  if(active&&!sitePublicationPoll)sitePublicationPoll=setInterval(pollState,2000);
+  if(!active&&sitePublicationPoll){clearInterval(sitePublicationPoll);sitePublicationPoll=null;}
+}
+$('#site-publication-retry').onclick=async e=>{
+  const session=csrf;
+  try{await action(e.currentTarget,'sites',null,{background:true,retry_publication:true},{inlineError:true});}
+  catch(error){if(session===csrf&&state)$('#site-publication-message').textContent=error.message;}
+};
 function renderNavigationIssues(){
+  renderSitePublication();
+  globalThis.domainOnboardingUI?.renderNotice();
   const issues=navigationIssues(state);
+  $('#cloudflare-permission-alert').hidden=currentView==='settings'||!(state.cloudflare_permission_issues||[]).length;
   for(const [view,reasons] of Object.entries(issues)){
     const button=$('[data-view='+view+']'),badge=$('#'+view+'-nav-status');
       const recheck=view==='settings'&&!reasons.length&&(state.cloudflare_permission_issues||[]).some(issue=>issue.status==='needs_recheck');
@@ -1072,19 +1213,28 @@ function renderNavigationIssues(){
       button.title=reasons.length&&view!=='overview'?[...new Set(reasons)].join('；'):recheck?'凭据已更新，请重试原操作核验权限':'';
       if(view==='sites'&&!reasons.length){const readiness=connectorReadiness(state);if(readiness.attention&&state.cloudflare_setup?.ready){badge.hidden=false;badge.textContent=readiness.label;badge.className='nav-status '+readiness.kind;button.title=readiness.detail;}}
   }
-  const reasons=[...new Set(issues[currentView]||[])].filter(reason=>(currentView!=='sites'||reason!==connectorReadiness(state).detail)&&(currentView!=='overview'||!reason.startsWith('账户配置未完成：')));
+  const reasons=[...new Set(issues[currentView]||[])].filter(reason=>!(state.site_publication?.phase==='failed'&&['网站有待发布变更，请重试发布','上次发布未完成或核验失败，请检查并重试'].includes(reason))&&reason!=='新域名尚未切换 DNS，请查看域名接入预览并确认'&&reason!=='Cloudflare 操作失败，请前往账户与域名核对权限'&&(currentView!=='sites'||reason!==connectorReadiness(state).detail)&&(currentView!=='overview'||!reason.startsWith('账户配置未完成：')));
   $('#view-issues').hidden=!reasons.length;
   $('#view-issues-list').innerHTML=reasons.map(reason=>'<li>'+esc(reason)+'</li>').join('');
 }
 
 function renderActionAvailability(){
+  const publishing=['queued','verification','publishing'].includes(state.site_publication?.phase);
+  const siteSave=$('#site-form button.primary');
+  if(!siteSave.dataset.busy)siteSave.disabled=publishing;
   const cfg=state.settings,credentials=state.credentials,conn=state.connector;
   const humanSites=state.sites.filter(site=>site.enabled&&site.human_check);
   const ready=!!state.cloudflare_setup?.ready;
   $('#create-tunnel').textContent=cfg.tunnel_id?'获取隧道令牌 →':state.tunnel_pending?'核对并恢复隧道':'创建隧道';
   $('#create-tunnel').hidden=!!(cfg.tunnel_id&&credentials.tunnel_token);
   $('#tunnel-maintenance').hidden=!cfg.tunnel_id;
-  $('#tunnel-token-state').textContent=credentials.tunnel_token?'已保存':'未保存';
+  $('#tunnel-token-state').textContent=credentials.tunnel_token?'已配置，无需操作':'待配置';
+  const tunnelDetails=$('#tunnel-maintenance'),tunnelState=cfg.tunnel_id?(credentials.tunnel_token?'ready':'missing'):'none';
+  if(tunnelDetails.dataset.connectionState!==tunnelState){
+    tunnelDetails.open=tunnelState==='missing';
+    if(tunnelState==='missing')$('#account-config-details').open=true;
+    tunnelDetails.dataset.connectionState=tunnelState;
+  }
   $('#connector-start').textContent='启动连接器';
   $('#connector-start').hidden=!!conn.running;
   $('#connector-stop').hidden=!conn.running;
@@ -1104,35 +1254,35 @@ function renderActionAvailability(){
   }
 }
 
-$('#read-token-save').onclick=async e=>{
+$('#read-token-save').onclick=async e=>{const session=csrf;
  const input=e.currentTarget.form.elements.cf_read_token,feedback=$('#read-token-feedback');
  if(!input.value.trim()){feedback.textContent='请先粘贴只读 API Token';input.focus();return;}
- try{await action(e.currentTarget,'credentials',null,{cf_read_token:input.value.trim()});input.value='';feedback.textContent='只读令牌已保存';}
- catch(err){feedback.textContent=err.message;}
+ try{await action(e.currentTarget,'credentials',null,{cf_read_token:input.value.trim()});if(session!==csrf)return;input.value='';feedback.textContent='只读令牌已保存';}
+ catch(err){if(session!==csrf)return;feedback.textContent=err.message;}
 };
-$('#read-token-remove').onclick=async e=>{
-  try{await action(e.currentTarget,'credentials',null,{remove_cf_read_token:true});$('#read-token-save').form.elements.cf_read_token.value='';$('#read-token-feedback').textContent='只读令牌已移除';}catch(err){$('#credentials-feedback').textContent=err.message;}
+$('#read-token-remove').onclick=async e=>{const session=csrf;
+  try{await action(e.currentTarget,'credentials',null,{remove_cf_read_token:true});if(session!==csrf)return;$('#read-token-save').form.elements.cf_read_token.value='';$('#read-token-feedback').textContent='只读令牌已移除';}catch(err){if(session!==csrf)return;$('#credentials-feedback').textContent=err.message;}
 };
 
 $('#site-zone').onchange=()=>{const z=configuredZones(state).find(z=>z.zone_id===$('#site-zone').value);$('#site-form').elements.hostname.placeholder='app.'+(z?.zone_name||'example.com');};
 let zoneChoices=[];
-$('#zones-discover').onclick=async e=>{
+$('#zones-discover').onclick=async e=>{const session=csrf;
  const feedback=$('#zones-feedback');$('#zone-management').hidden=false;$('#zone-choice-row').hidden=true;feedback.textContent='正在读取可添加的域名…';
- try{const result=await action(e.currentTarget,'cloudflare/zones',null,{});zoneChoices=result.zones.filter(z=>!configuredZones(state).some(saved=>saved.zone_id===z.zone_id));$('#zone-choice').innerHTML=zoneChoices.map(z=>`<option value="${esc(z.zone_id)}">${esc(z.zone_name)}</option>`).join('');$('#zone-choice-row').hidden=!zoneChoices.length;feedback.textContent=zoneChoices.length?'':'账户中没有其他可添加的域名。也可以手动输入域名与 Zone ID。';}
- catch(err){feedback.textContent=err.message;}
+ try{const result=await action(e.currentTarget,'cloudflare/zones',null,{},{inlineError:true});if(session!==csrf||!state)return;zoneChoices=result.zones.filter(z=>!configuredZones(state).some(saved=>saved.zone_id===z.zone_id));$('#zone-choice').innerHTML=zoneChoices.map(z=>`<option value="${esc(z.zone_id)}">${esc(z.zone_name)}</option>`).join('');$('#zone-choice-row').hidden=!zoneChoices.length;feedback.textContent=zoneChoices.length?'':'账户中没有其他可添加的域名。也可以手动输入域名与 Zone ID。';}
+ catch(err){if(session!==csrf)return;feedback.textContent=err.message;}
 };
 $('#zone-add-cancel').onclick=()=>{$('#zone-management').hidden=true;$('#zones-feedback').textContent='';};
 async function attachZone(button,zone){
- const feedback=$('#zones-feedback');feedback.textContent='正在核验域名所属账户及状态…';
- try{await action(button,'zones',null,zone);$('#zone-choice-row').hidden=true;$('#zone-add-name').value='';$('#zone-add-id').value='';invalidatePlan();$('#zone-management').hidden=true;feedback.textContent=zone.zone_name+' 已接入。';}
- catch(err){feedback.textContent=err.message;}
+ const session=csrf,feedback=$('#zones-feedback');feedback.textContent='正在核验域名所属账户及状态…';
+ try{await action(button,'zones',null,zone,{inlineError:true});if(session!==csrf)return;$('#zone-choice-row').hidden=true;$('#zone-add-name').value='';$('#zone-add-id').value='';invalidatePlan();$('#zone-management').hidden=true;feedback.textContent=zone.zone_name+' 已接入。';}
+ catch(err){if(session!==csrf)return;feedback.textContent=err.message;}
 }
 $('#zone-add').onclick=e=>{const zone=zoneChoices.find(z=>z.zone_id===$('#zone-choice').value);if(zone)attachZone(e.currentTarget,zone);};
 $('#zone-add-manual').onclick=e=>attachZone(e.currentTarget,{zone_name:$('#zone-add-name').value.trim(),zone_id:$('#zone-add-id').value.trim()});
 
-$('#configured-zones').onclick=async e=>{const button=e.target.closest('[data-remove-zone]');if(!button)return;try{await action(button,'zones/'+button.dataset.removeZone+'/remove',null,{});invalidatePlan();$('#zones-feedback').textContent='域名已从 LanBridge 移除，Cloudflare DNS 未改动。';}catch(err){$('#zones-feedback').textContent=err.message;$('#account-config-details').open=true;}};
+$('#configured-zones').onclick=async e=>{const session=csrf;const button=e.target.closest('[data-remove-zone],[data-default-zone]');if(!button)return;const setDefault=!!button.dataset.defaultZone,zoneId=button.dataset.defaultZone||button.dataset.removeZone,wasDefault=zoneId===state?.settings.zone_id;try{const result=await action(button,'zones/'+zoneId+(setDefault?'/default':'/remove'),null,{},{inlineError:true});if(session!==csrf)return;invalidatePlan();$('#zones-feedback').textContent=setDefault?'默认域名已设为 '+result.settings.zone_name+'，已有网站关联和转发不变。':'域名已从 LanBridge 移除，Cloudflare DNS 未改动。'+(wasDefault?(result.settings.zone_name?'默认域名已改为 '+result.settings.zone_name+'。':'已无接入域名，默认选择已清空。'):'');}catch(err){if(session!==csrf)return;$('#zones-feedback').textContent=err.message;}};
 
-$('#restart').onclick=()=>{if(remoteAccess||state?.access_scope==='sites')return;$('#restart-error').textContent='';$('#restart-address').textContent='重启后管理地址：http://127.0.0.1:'+(state.pending_admin_port||state.settings.admin_port)+'/admin';$('#restart-dialog').showModal();};
+$('#sidebar-restart').onclick=()=>{if(remoteAccess||state?.access_scope==='sites')return;$('#restart-error').textContent='';$('#restart-address').textContent='重启后管理地址：http://127.0.0.1:'+(state.pending_admin_port||state.settings.admin_port)+'/admin';$('#restart-dialog').showModal();};
 $('#cancel-restart').onclick=()=>$('#restart-dialog').close();
 $('#confirm-restart').onclick=async e=>{
   const button=e.currentTarget,session=csrf;button.disabled=true;$('#cancel-restart').disabled=true;

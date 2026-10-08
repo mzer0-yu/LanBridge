@@ -42,7 +42,7 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
                 return JSONResponse({"detail": "远程管理入口不可用"}, 403)
             if not service.store.get("admin"):
                 return JSONResponse({"detail": "请先在本机创建管理员"}, 503)
-            if request.url.path in {"/api/setup", "/api/shutdown", "/api/restart", "/api/password", "/api/admin-port", "/api/connector-auto-start", "/api/gateway-port", "/api/gateway-retry"} or request.url.path.startswith("/api/local-login/") or request.url.path.startswith("/api/cloudflare/browser-authorize"):
+            if request.url.path in {"/api/setup", "/api/shutdown", "/api/restart", "/api/password", "/api/admin-port", "/api/connector-auto-start", "/api/gateway-port", "/api/gateway-retry"} or request.url.path.startswith("/api/domain-onboarding") or request.url.path.startswith("/api/local-login/") or request.url.path.startswith("/api/cloudflare/browser-authorize"):
                 return JSONResponse({"detail": "此操作仅支持本机访问"}, 403)
             if not service.store.get("public_client_enabled", True) and request.url.path in PUBLIC_CLIENT_PATHS:
                 return disabled_client_response(request.url.path)
@@ -73,7 +73,7 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
             return JSONResponse({"detail": "临时管理 Token 无效、已到期或已撤销"}, 401)
         if request.method not in ("GET", "HEAD") and (not bearer or request.headers.get("origin")) and request.headers.get("origin") != expected_origin:
             return JSONResponse({"detail": "请求来源校验失败"}, 403)
-        public = request.url.path in ("/", "/admin", "/admin/", "/client", "/client/", "/client.js", "/client.css", "/api/client/routes", "/app.js", "/local-login.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login", "/api/token-login", "/api/local-login/browsers", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/cancel")
+        public = request.url.path in ("/", "/admin", "/admin/", "/client", "/client/", "/client.js", "/client.css", "/api/client/routes", "/app.js", "/domain-onboarding.js", "/local-login.js", "/style.css", "/favicon.svg", "/api/bootstrap", "/api/setup", "/api/login", "/api/token-login", "/api/local-login/browsers", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/cancel")
         session = service.store.session(request.cookies.get("lb_admin", ""))
         if grant:
             session = grant | {"csrf": "", "access_token_id": grant["id"]}
@@ -168,6 +168,58 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
     @app.get("/app.js")
     def script():
         return FileResponse(ui / "app.js")
+
+    @app.get("/domain-onboarding.js")
+    def domain_onboarding_script():
+        return FileResponse(ui / "domain-onboarding.js")
+
+    def require_domain_admin(request):
+        session = request.state.session or {}
+        if remote or session.get("scope", "admin") != "admin" or session.get("access_token_id"):
+            raise ValueError("域名迁移仅支持本机管理员")
+
+    @app.get("/api/domain-onboarding")
+    def domain_onboarding_status(request: Request):
+        require_domain_admin(request)
+        return service.domain_onboarding.status()
+
+    @app.get("/api/domain-onboarding/help")
+    def domain_onboarding_help(request: Request):
+        require_domain_admin(request)
+        return FileResponse(ui.parent / "docs" / "domain-onboarding.md", media_type="text/plain; charset=utf-8")
+
+    @app.get("/api/domain-onboarding/connected-domains")
+    async def aliyun_connected_domains(request: Request):
+        require_domain_admin(request)
+        result = await asyncio.to_thread(service.domain_onboarding.connected_domains, refresh=request.query_params.get('refresh') == '1')
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/domain-onboarding/backup")
+    def domain_onboarding_backup(request: Request):
+        require_domain_admin(request)
+        return JSONResponse(service.domain_onboarding.backup(), headers={"Content-Disposition": 'attachment; filename="domain-dns-backup.json"'})
+
+    @app.post("/api/domain-onboarding/{action}")
+    async def domain_onboarding_action(action: str, request: Request):
+        require_domain_admin(request)
+        values = await body(request)
+        manager = service.domain_onboarding
+        if action == "oauth":
+            return await asyncio.to_thread(manager.authorize_aliyun)
+        if action == "credentials":
+            return await asyncio.to_thread(manager.save_credentials, values)
+        if action == "dismiss-error":
+            return await asyncio.to_thread(manager.dismiss_prepare_failure, values.get("checked_at"))
+        if action == "prepare":
+            return await asyncio.to_thread(manager.prepare, values.get("domain"))
+        if action in {"confirm", "finish"}:
+            fn = manager.confirm if action == "confirm" else manager.finish_tracking
+            return await asyncio.to_thread(fn, values.get("id"), values.get("confirmed_domain"))
+        if action == "check":
+            return await asyncio.to_thread(manager.check)
+        if action == "cancel":
+            return await asyncio.to_thread(manager.cancel, values.get("id"))
+        raise ValueError("未知域名接入操作")
 
     @app.get("/style.css")
     def style():
@@ -371,8 +423,9 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         managed_read = service.store.get("managed_read_token")
         if managed_read:
             managed_read = {k: v for k, v in managed_read.items() if k != "credential_digest"}
-        sites_snapshot = service.sites()
-        result = {"settings": service.settings(), "pending_admin_port": service.store.get("pending_admin_port"), "restart_warning": service.store.get("restart_warning"), "pending_gateway_port": service.store.get("pending_gateway_port"), "sites": sites_snapshot, "connector": service.connector.status(), "cloudflare_setup": service.cloudflare_setup(),
+        configuration = service.configuration_snapshot()
+        sites_snapshot = configuration['sites']
+        result = {**configuration, "pending_admin_port": service.store.get("pending_admin_port"), "restart_warning": service.store.get("restart_warning"), "pending_gateway_port": service.store.get("pending_gateway_port"), "connector": service.connector.status(),
                 "agent_skill_path": str((ui.parent / "skills" / "lanbridge" / "SKILL.md").resolve()) if not remote else None,
                 "tunnel_pending": bool(service.store.get("pending_tunnel_create")),
                 "published_hosts": service.store.get("published_hosts", []),
@@ -381,9 +434,18 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
                 "site_probes": {site["id"]: service.store.get("probe_" + site["id"]) for site in sites_snapshot},
                 "cloudflare": service.store.get("cloudflare_status"), "audit": [] if limited else service.store.audit_list(), "audit_storage": {} if limited else service.store.audit_stats(),
                 "cloudflare_permission_issues": service.permission_issues(),
+                "oauth_refresh": service.oauth_refresh_status(),
                 "browser_auth": browser_auth.status() if browser_auth else {"phase": "local_only", "message": "浏览器授权请在本机完成"},
                 "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token") or service.store.get("pending_browser_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
-                "credentials": {k: bool(service.store.secret(k)) for k in ("cf_read_token", "cf_write_token", "turnstile_secret", "tunnel_token")}}
+                }
+        result["site_publication"] = service.site_publication.status()
+        result["domain_onboarding"] = None
+        if not remote and not limited:
+            job = service.domain_onboarding.status()["job"]
+            if job:
+                result["domain_onboarding"] = {key: job[key] for key in ("domain", "phase")}
+        updates = getattr(service, "update_controller", None)
+        result["update_status"] = updates.status() if updates else None
         result["public_client_enabled"] = service.store.get("public_client_enabled", True)
         result["connector_auto_start"] = service.store.get("connector_auto_start", True)
         result["connector_auto_start_supported"] = True
@@ -398,7 +460,7 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         if result["access_scope"] == "sites":
             result.update(audit=[], audit_storage={}, agent_skill_path=None, pending_gateway_port=None, pending_admin_port=None, restart_warning=None)
             if "account" not in result["access_permissions"]:
-                result.update(token_management={}, cloudflare_permission_issues=[], browser_auth={"phase": "local_only"})
+                result.update(token_management={}, cloudflare_permission_issues=[], oauth_refresh=None, browser_auth={"phase": "local_only"})
                 result["settings"]["cloudflared_path"] = ""
         return result
 
@@ -524,6 +586,12 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         cfg = await asyncio.to_thread(service.remove_zone, zone_id)
         return {"settings": cfg, "saved": True}
 
+    @app.post("/api/zones/{zone_id}/default")
+    async def set_default_zone(zone_id: str, request: Request):
+        await body(request)
+        cfg = await asyncio.to_thread(service.set_default_zone, zone_id)
+        return {"settings": cfg, "saved": True}
+
     @app.post("/api/credentials")
     async def credentials(request: Request):
         data = await body(request)
@@ -572,7 +640,18 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
     @app.post("/api/sites")
     async def sites(request: Request):
         import asyncio
-        return await asyncio.to_thread(service.save_site, await body(request), synchronize_verification=True, auto_publish=True)
+        data = await body(request)
+        background = data.pop('background', False)
+        retry = data.pop('retry_publication', False)
+        if type(background) is not bool or type(retry) is not bool:
+            raise ValueError('后台保存选项格式无效')
+        if background:
+            if retry and data:
+                raise ValueError('重试发布不能同时修改网站配置')
+            return await asyncio.to_thread(service.site_publication.submit, None if retry else data)
+        if retry:
+            raise ValueError('重试发布需要后台模式')
+        return await asyncio.to_thread(service.save_site, data, synchronize_verification=True, auto_publish=True)
 
     @app.post("/api/sites/{site_id}/probe")
     async def probe(site_id: str):
@@ -604,6 +683,15 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         data = await body(request)
         if action == "browser-authorize":
             return browser_auth.start(data.get("browser", "default"))
+        if action == "browser-authorize-refresh":
+            if remote or request.state.session.get("scope", "admin") != "admin" or request.state.session.get("access_token_id"):
+                raise ValueError("请在本机使用管理员账户重试续期")
+            if (service.store.get("managed_business_token") or {}).get("kind") != "oauth":
+                raise ValueError("当前未使用 Cloudflare 浏览器授权")
+            await asyncio.to_thread(browser_auth.access_token, force_refresh=True)
+            return {"saved": True}
+        if action == "browser-authorize-setup":
+            return browser_auth.continue_setup()
         if action == "browser-authorize-cancel":
             return await asyncio.to_thread(browser_auth.cancel)
         if action == "browser-authorize-restart":

@@ -1,0 +1,37 @@
+const path=require('path'),assert=require('assert'),{chromium}=require('playwright');
+const root=path.resolve(__dirname,'../../ui');
+(async()=>{const browser=await chromium.launch({headless:true,channel:'msedge'});try{for(const width of [1440,390]){
+const page=await browser.newPage({viewport:{width,height:900}}),errors=[];let issue={phase:'error',message:'自动续期未完成，云端管理暂不可用。管理员登录不受影响，已运行的转发不会因此停止。'},retries=0;
+page.on('pageerror',e=>errors.push(e.message));
+await page.route('http://lb.preview/**',async r=>{const p=new URL(r.request().url()).pathname;
+if(!p.startsWith('/api/'))return r.fulfill({path:path.join(root,(p==='/'||p==='/admin')?'index.html':p.slice(1))});
+if(p==='/api/cloudflare/zones')return r.fulfill({status:400,json:{detail:'测试授权续期失败'}});
+if(p==='/api/domain-onboarding')return r.fulfill({json:{configured:true,auth_mode:'oauth',job:null}});
+if(p==='/api/domain-onboarding/prepare')return r.fulfill({status:400,json:{detail:'Cloudflare 管理授权未能自动续期，暂时无法执行云端管理操作'}});
+let data={};if(p==='/api/bootstrap')data={initialized:true,authenticated:true,csrf:'test'};
+if(p==='/api/state')data={...require('./fixture').state,oauth_refresh:issue};
+if(p==='/api/cloudflare/browser-authorize-refresh'){retries++;await new Promise(resolve=>setTimeout(resolve,350));if(retries===1){issue.retry_failed=true;return r.fulfill({status:400,json:{detail:'测试续期仍失败'}});}issue=null;data={saved:true};}
+return r.fulfill({json:data});});
+await page.goto('http://lb.preview/admin');await page.locator('[data-view="settings"]').click();
+await page.locator('#oauth-renewal-notice').waitFor();
+assert((await page.locator('#oauth-renewal-message').textContent()).includes('管理员登录不受影响'));
+await page.locator('#zones-discover').click();await page.locator('#zones-feedback').filter({hasText:'测试授权续期失败'}).waitFor();
+assert(await page.locator('#operation-feedback').isHidden());
+assert(await page.locator('#oauth-renewal-reauthorize').isHidden());
+assert.equal(await page.locator('#oauth-renewal-title').textContent(),'Cloudflare 云端管理暂不可用');
+await page.locator('#domain-onboarding>summary').click();await page.waitForFunction(()=>document.querySelector('#domain-credential-status').textContent==='已授权');
+await page.locator('#domain-prepare input').fill('new.example.net');await page.locator('#domain-prepare button').click();
+await page.locator('#domain-onboarding-status').filter({hasText:'请先在上方重试'}).waitFor();
+assert(!(await page.locator('#domain-onboarding-status').textContent()).includes('暂时无法执行'));
+assert.equal(await page.locator('#domain-prepare input').inputValue(),'new.example.net');
+await page.screenshot({path:path.resolve(__dirname,'../../.test-artifacts/ui/account-domain-renewal-')+width+'.png',fullPage:true});
+await page.locator('#oauth-renewal-retry').click();
+assert.equal(await page.locator('#oauth-renewal-retry').textContent(),'正在续期…');
+assert(await page.locator('#oauth-renewal-retry').isDisabled());
+await page.locator('#oauth-renewal-feedback').filter({hasText:'续期仍未完成'}).waitFor();
+assert(await page.locator('#operation-feedback').isHidden());
+assert.equal(await page.locator('#oauth-renewal-retry').textContent(),'重试续期');
+await page.locator('#oauth-renewal-reauthorize').waitFor();
+await page.locator('#oauth-renewal-retry').click();await page.locator('#oauth-renewal-notice').waitFor({state:'hidden'});
+assert.equal(retries,2);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.deepEqual(errors,[]);
+await page.close();}console.log('PASS: renewal guidance, explicit retry, success clears notice, desktop/mobile');}finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});

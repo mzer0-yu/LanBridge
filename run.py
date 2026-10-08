@@ -46,7 +46,7 @@ def startup_result(path, **result):
         temporary.replace(path)
 
 
-def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=None, gateway_port=None, result_path=None, *, fallback_admin_port=None, resume_connector=None):
+def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=None, gateway_port=None, result_path=None, *, fallback_admin_port=None, resume_connector=None, hot_reload=True):
     import secrets
     import uvicorn
     from lanbridge.admin import create_admin
@@ -64,6 +64,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
     info_path = service.store.root / "runtime.json"
     fell_back = False
     auto_connect_thread = None
+    updates = None
     try:
         try:
             listener.bind(("127.0.0.1", cfg["admin_port"]))
@@ -88,6 +89,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
         result = gateway.start(gateway_port)
         if result["error"]:
             print(result["error"] + " 管理台仍可使用。", flush=True)
+        service.site_publication.recover()
         service.runtime_id = secrets.token_hex(16)
         service.launcher_control_token = secrets.token_urlsafe(32)
         info = {"instance": service.runtime_id, "admin_port": cfg["admin_port"], "launcher_control": service.launcher_control_token}
@@ -115,6 +117,17 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
                 service.restart_plan = {"port": port, "previous_port": cfg["admin_port"], "resume_connector": service.connector.status()["running"]}
                 return {"restarting": True, "port": port, "url": f"http://127.0.0.1:{port}/admin"}
         admin = uvicorn.Server(uvicorn.Config(create_admin(service, shutdown, restart=restart), host="127.0.0.1", port=cfg["admin_port"], proxy_headers=False, access_log=False, log_config=None, timeout_graceful_shutdown=8, log_level="warning"))
+        from lanbridge.updates import UpdateController, check_imports
+        def reload_source():
+            if admin.started and not admin.should_exit:
+                restart()
+                service.restart_plan["source_reload"] = True
+                shutdown()
+            else:
+                raise ValueError("管理台尚未就绪")
+        updates = UpdateController(ROOT, service, reload_source, enabled=hot_reload, preflight=lambda: check_imports(ROOT))
+        service.update_controller = updates
+        updates.start()
         if resume_connector is None:
             def auto_connect():
                 import time
@@ -139,12 +152,17 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
                     if open_browser:
                         webbrowser.open(f'http://127.0.0.1:{cfg["admin_port"]}/admin')
             threading.Thread(target=show_browser, daemon=True).start()
+        service.domain_onboarding.resume()
         admin.run(sockets=[listener])
     finally:
+        if updates is not None:
+            updates.stop()
         if auto_connect_thread is not None:
             if admin is not None:
                 admin.should_exit = True
             auto_connect_thread.join()
+        service.site_publication.stop()
+        service.domain_onboarding.stop()
         gateway.stop()
         if hasattr(service, "browser_auth"):
             service.browser_auth.stop()
@@ -191,6 +209,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("capabilities")
     server = sub.add_parser("serve", help="启动本机管理服务；默认前台运行、不打开浏览器")
+    server.add_argument("--hot-reload", action=argparse.BooleanOptionalAction, default=True, help="检测源码变化并受控自动重载；默认启用")
     server.add_argument("--open-browser", action="store_true", help="管理台就绪后请求打开浏览器；默认不打开")
     server.add_argument("--admin-port", type=int, help="启动前选择管理台端口（1024–65535），成功绑定后保存")
     server.add_argument("--gateway-port", type=int, help="启动前选择转发网关端口（1024–65535），成功绑定后保存")
@@ -261,7 +280,7 @@ def main():
         lock = acquire_runtime(service.store.root) if args.command != "status" else None
         try:
             if args.command == "serve":
-                serve(service, args.open_browser, args.authorize_cloudflare, args.admin_port, args.gateway_port, args.startup_result, fallback_admin_port=args.fallback_admin_port, resume_connector=args.resume_connector)
+                serve(service, args.open_browser, args.authorize_cloudflare, args.admin_port, args.gateway_port, args.startup_result, fallback_admin_port=args.fallback_admin_port, resume_connector=args.resume_connector, hot_reload=args.hot_reload)
                 plan = getattr(service, "restart_plan", None)
                 if plan:
                     import subprocess
@@ -270,7 +289,11 @@ def main():
                     executable = Path(sys.executable)
                     if os.name == "nt" and executable.with_name("pythonw.exe").exists():
                         executable = executable.with_name("pythonw.exe")
-                    command = [str(executable), str(ROOT / "run.py"), "--data-dir", str(service.store.root), "serve", "--open-browser", "--admin-port", str(plan["port"]), "--fallback-admin-port", str(plan["previous_port"])]
+                    command = [str(executable), str(ROOT / "run.py"), "--data-dir", str(service.store.root), "serve", "--admin-port", str(plan["port"]), "--fallback-admin-port", str(plan["previous_port"])]
+                    if not plan.get("source_reload"):
+                        command.append("--open-browser")
+                    if not args.hot_reload:
+                        command.append("--no-hot-reload")
                     command.append("--resume-connector" if plan["resume_connector"] else "--no-resume-connector")
                     subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
                 return 0

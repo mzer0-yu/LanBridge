@@ -41,6 +41,16 @@ PREFIX = "/.lanbridge"
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 
 
+def verification_response(data, status_code=200, headers=None):
+    return JSONResponse(data, status_code, headers={"Cache-Control": "no-store", **(headers or {})})
+
+
+def gateway_rejection(path, detail, status_code, headers=None):
+    if path == PREFIX + "/verify":
+        return verification_response({"detail": detail}, status_code, headers)
+    return Response(detail, status_code, headers=headers)
+
+
 class TransferLog:
     """Correlate response framing failures without logging cookies or query strings."""
     def __init__(self, app, logger=None):
@@ -155,7 +165,7 @@ class ResourceLimits:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1013})
             else:
-                await Response("请求过于频繁，请稍后重试", 429, headers={"Retry-After": "1", "Cache-Control": "no-store"})(scope, receive, send)
+                await gateway_rejection(scope["path"], "请求过于频繁，请稍后重试", 429, headers={"Retry-After": "1", "Cache-Control": "no-store"})(scope, receive, send)
             return
         self.tokens -= 1
         kind = "verify" if scope["type"] == "http" and scope["path"] == PREFIX + "/verify" else scope["type"]
@@ -166,7 +176,7 @@ class ResourceLimits:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1013})
             else:
-                await Response("网关繁忙，请稍后重试", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})(scope, receive, send)
+                await gateway_rejection(scope["path"], "网关繁忙，请稍后重试", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})(scope, receive, send)
             return
         self.active[kind] += 1
         self.peers[key] = self.peers.get(key, 0) + 1
@@ -309,36 +319,63 @@ def gate_page(service, site):
     if site["human_check"] and (not key or not service.store.secret("turnstile_secret")):
         return HTMLResponse("人类验证尚未配置，访问暂时关闭。", 503)
     title = html.escape(site["name"])
-    widget = f'<div class="cf-turnstile" data-sitekey="{html.escape(key, quote=True)}" data-action="lanbridge" data-callback="onHumanVerified" data-expired-callback="onHumanExpired"></div>' if site["human_check"] else ""
+    widget = f'<div class="cf-turnstile" data-sitekey="{html.escape(key, quote=True)}" data-action="lanbridge" data-callback="onHumanVerified" data-expired-callback="onHumanExpired" data-error-callback="onHumanError" data-timeout-callback="onHumanTimeout"></div>' if site["human_check"] else ""
     password = '<label>访问口令<input id="passcode" type="password" autocomplete="current-password" required maxlength="256"></label>' if site["passcode_required"] else ""
     automatic = site["human_check"] and not site["passcode_required"]
     button = '<button id="continue" hidden>重试验证</button>' if automatic else '<button id="continue">验证并继续</button>'
     description = "完成人类验证后将自动进入网站。" if automatic else "完成验证并输入访问口令后，继续访问该网站。"
     page = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>访问验证</title>
-<style>body{background:#f3f5f7;font:15px system-ui;color:#233347;margin:0;display:grid;place-items:center;min-height:100vh}.card{background:white;border:1px solid #dce2e9;border-radius:18px;padding:36px;width:min(340px,80vw)}h1{font-size:25px}p{color:#63758b;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:1px solid #ccd5df;margin:10px 0}button{background:#1c6657;color:white;cursor:pointer}.cf-turnstile{margin:16px 0}#error{color:#ad3b3b}</style>
-<div class="card"><small>LANBRIDGE · 安全访问</small><h1>''' + title + '''</h1><p>''' + description + '''</p><form id="verify">''' + password + widget + button + '''</form><p id="verify-status" role="status"></p><p id="error" role="alert"></p></div>
+<style>body{background:#f3f5f7;font:15px system-ui;color:#233347;margin:0;display:grid;place-items:center;min-height:100vh}.card{box-sizing:border-box;background:white;border:1px solid #dce2e9;border-radius:18px;padding:36px;width:min(414px,calc(100% - 24px));margin:12px 0;overflow-wrap:anywhere}h1{font-size:25px}p{color:#63758b;line-height:1.7}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:1px solid #ccd5df;margin:10px 0}button{background:#1c6657;color:white;cursor:pointer}.cf-turnstile{margin:16px 0}#error{color:#ad3b3b}@media(max-width:450px){.card{padding:24px 20px}}</style>
+<div class="card"><small>网站安全验证</small><h1>''' + title + '''</h1><p>''' + description + '''</p><form id="verify">''' + password + widget + button + '''</form><p id="verify-status" role="status"></p><p id="error" role="alert"></p></div>
 <script>
 const form=document.querySelector('#verify'),button=document.querySelector('#continue'),message=document.querySelector('#verify-status'),error=document.querySelector('#error');
 const automatic=!document.querySelector('#passcode');
-let humanToken='',submitting=false;
+const humanWidget=document.querySelector('.cf-turnstile');
+if(humanWidget&&humanWidget.clientWidth<300)humanWidget.setAttribute('data-size','compact');
+let humanToken='',submitting=false,autoSubmitAllowed=true;
+function resetHuman(){try{if(window.turnstile)window.turnstile.reset()}catch{error.textContent='验证组件未能恢复，请刷新页面后重试。'}}
+function verificationFailure(text){const err=Error();err.verificationMessage=text;return err}
+async function verificationResult(response){
+  let data;
+  try{data=await response.json()}catch(err){
+    if(err.name==='TimeoutError'||err.name==='AbortError')throw err;
+  }
+  if(!response.ok){
+    const fallback=response.status===429?'验证过于频繁，请稍后重试。':
+      response.status===408?'验证请求超时，请重新验证。':
+      response.status===403?'验证未通过，请重新验证。':
+      '验证服务暂时未能返回有效结果，请重新验证；仍失败时请稍后重试。';
+    throw verificationFailure(typeof data?.detail==='string'&&data.detail.trim()?data.detail:fallback);
+  }
+  if(data?.verified!==true)throw verificationFailure('验证响应不完整，请重新验证；仍失败时请稍后重试。');
+}
 async function submitVerification(){
   if(submitting||!form.reportValidity())return;
+  if(humanWidget&&!humanToken){
+    if(!window.turnstile){location.reload();return}
+    error.textContent='请重新完成人类验证后继续。';resetHuman();return;
+  }
   submitting=true;button.disabled=true;error.textContent='';message.textContent='正在确认验证结果…';
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000);
   try{
-    const r=await fetch('/.lanbridge/verify',{method:'POST',signal:AbortSignal.timeout(30000),headers:{'Content-Type':'application/json'},body:JSON.stringify({token:humanToken||document.querySelector('[name="cf-turnstile-response"]')?.value||'',passcode:document.querySelector('#passcode')?.value||''})});
-    if(!r.ok){const d=await r.json();throw Error(d.detail||'验证失败')}
+    const r=await fetch('/.lanbridge/verify',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({token:humanToken,passcode:document.querySelector('#passcode')?.value||''})});
+    await verificationResult(r);
     message.textContent='验证通过，正在进入网站…';location.reload();
   }catch(err){
-    error.textContent=err.name==='TimeoutError'?'验证请求超时，请重试。':err.message;message.textContent='';humanToken='';
+    autoSubmitAllowed=false;
+    error.textContent=controller.signal.aborted||err.name==='TimeoutError'||err.name==='AbortError'?'验证请求超时，请重试。':err.verificationMessage||'验证请求未能完成，请检查网络后重新验证。';message.textContent='';humanToken='';
     button.hidden=false;
-    if(window.turnstile)window.turnstile.reset();
-  }finally{submitting=false;button.disabled=false}
+    resetHuman();
+  }finally{clearTimeout(timer);submitting=false;button.disabled=false}
 }
-window.onHumanVerified=token=>{humanToken=token;if(automatic)submitVerification();else message.textContent='人类验证已通过，请输入口令并继续。'};
-window.onHumanExpired=()=>{humanToken='';message.textContent='验证已过期，请重新验证。'};
+window.onHumanVerified=token=>{if(submitting)return;humanToken=token;error.textContent='';if(automatic&&autoSubmitAllowed)submitVerification();else message.textContent=automatic?'人类验证已通过，请点击重试验证继续。':'人类验证已通过，请输入口令并继续。'};
+window.onHumanExpired=()=>{humanToken='';if(!submitting)message.textContent='验证已过期，请重新验证。'};
+window.onHumanError=()=>{humanToken='';if(!submitting){message.textContent='';error.textContent='人类验证暂不可用，请检查网络后重试；仍失败时请用系统浏览器打开。';button.hidden=false}};
+window.onHumanTimeout=()=>{humanToken='';if(!submitting){message.textContent='';error.textContent='人类验证已超时，请重新验证。';button.hidden=false}};
+window.onHumanScriptError=()=>{window.onHumanError();error.textContent='验证组件加载失败，请检查网络后点击重试验证。'};
 form.onsubmit=e=>{e.preventDefault();submitVerification()};
 </script>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></html>'''
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer onerror="onHumanScriptError()"></script></html>'''
     return HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
 
 
@@ -372,17 +409,17 @@ def create_gateway(service):
     async def policy(request):
         site = find_site(service, request)
         if not site:
-            return Response("Not found", 404)
+            return gateway_rejection(request.url.path, "Not found", 404)
         if site.get("paused"):
-            return Response("网站转发已暂停", 503, headers={"Cache-Control": "no-store"})
+            return gateway_rejection(request.url.path, "网站转发已暂停", 503, headers={"Cache-Control": "no-store"})
         if public_scheme(request) == "http":
             return RedirectResponse(str(request.url.replace(scheme="https", netloc=site["hostname"])), status_code=308)
         ip, country = visitor(request)
         request.state.site, request.state.ip = site, ip
         if denied_policy(site, ip, country):
-            return Response("Access denied", 403)
+            return gateway_rejection(request.url.path, "访问策略不允许此次访问", 403)
         if not limiter.allow((site["id"], ip, "request"), site["requests_per_minute"]):
-            return Response("请求过于频繁，请稍后重试", 429, headers={"Retry-After": "60"})
+            return gateway_rejection(request.url.path, "请求过于频繁，请稍后重试", 429, headers={"Retry-After": "60"})
         if request.url.path == PREFIX + "/verify":
             return None
         if request.url.path.startswith(PREFIX):
@@ -413,27 +450,27 @@ def create_gateway(service):
     async def verify(request: Request):
         site, ip = request.state.site, request.state.ip
         if request.headers.get("origin") != "https://" + site["hostname"]:
-            return JSONResponse({"detail": "来源校验失败"}, 403)
+            return verification_response({"detail": "来源校验失败"}, 403)
         if not limiter.allow((site["id"], ip, "verify"), 5):
-            return JSONResponse({"detail": "验证过于频繁，请稍后重试"}, 429, headers={"Retry-After": "60"})
+            return verification_response({"detail": "验证过于频繁，请稍后重试"}, 429, headers={"Retry-After": "60"})
         try:
             raw = await bounded_body(request)
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise ValueError()
         except OverflowError:
-            return Response(status_code=413)
+            return verification_response({"detail": "验证请求内容过大，请刷新页面后重试"}, 413)
         except TimeoutError:
-            return Response(status_code=408)
+            return verification_response({"detail": "验证请求超时，请重新验证"}, 408)
         except (ValueError, RecursionError):
-            return JSONResponse({"detail": "验证请求无效"}, 400)
+            return verification_response({"detail": "验证请求无效"}, 400)
         if site["passcode_required"] and not await anyio.to_thread.run_sync(password_check, str(body.get("passcode", "")), service.store.secret("passcode_" + site["id"])):
-            return JSONResponse({"detail": "口令不正确"}, 403)
+            return verification_response({"detail": "口令不正确"}, 403)
         if site["human_check"]:
             token = body.get("token", "")
             secret = service.store.secret("turnstile_secret")
             if not secret or not isinstance(token, str) or not 1 <= len(token) <= 2048:
-                return JSONResponse({"detail": "请完成人类验证"}, 403)
+                return verification_response({"detail": "请完成人类验证"}, 403)
             try:
                 async with httpx.AsyncClient(timeout=12, trust_env=False) as client:
                     result = await client.post("https://challenges.cloudflare.com/turnstile/v0/siteverify", data={"secret": secret, "response": token, "remoteip": ip})
@@ -441,10 +478,10 @@ def create_gateway(service):
                 if not isinstance(data, dict):
                     raise ValueError("invalid_verification_response")
                 if result.status_code != 200 or data.get("success") is not True or data.get("hostname") != site["hostname"] or data.get("action") != "lanbridge":
-                    return JSONResponse({"detail": "人类验证未通过，请重试"}, 403)
+                    return verification_response({"detail": "人类验证未通过，请重试"}, 403)
             except (httpx.HTTPError, ValueError, RecursionError):
-                return JSONResponse({"detail": "人类验证服务暂不可用"}, 503)
-        response = JSONResponse({"verified": True}, headers={"Cache-Control": "no-store"})
+                return verification_response({"detail": "人类验证服务暂不可用"}, 503)
+        response = verification_response({"verified": True})
         response.set_cookie(PASS_COOKIE, signed_pass(service, site, ip), max_age=site["session_minutes"] * 60, httponly=True, secure=True, samesite="lax", path="/")
         return response
 

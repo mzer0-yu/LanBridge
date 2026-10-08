@@ -2,9 +2,11 @@
 
 **把局域网网页带到公网，在一个管理台里完成发布与访问控制。**
 
-LanBridge 是面向 Windows 的自托管 Cloudflare Tunnel 管理工具。把 NAS 面板、开发服务、实验设备网页或内部工具映射到自己的公网子域名，集中管理网站、连接器和访问权限。无需在路由器上配置公网端口转发，也无需修改源站网页来加入人类验证。
+LanBridge 是面向 Windows 的自托管 Cloudflare Tunnel 管理工具。把 NAS 面板、开发服务、实验设备网页或内部工具映射到自己的公网根域名或子域名，集中管理网站、连接器和访问权限。无需在路由器上配置公网端口转发，也无需修改源站网页来加入人类验证。
 
-**当前正式版本：v1.0.0** · [下载 Release](https://github.com/mzer0-yu/LanBridge/releases/tag/v1.0.0) · [使用指南](docs/user-guide.md) · [反馈问题](https://github.com/mzer0-yu/LanBridge/issues)
+**当前代码版本：1.1.0-dev（开发版）** · [开发版说明](docs/development.md) · [使用指南](docs/user-guide.md) · [反馈问题](https://github.com/mzer0-yu/LanBridge/issues)
+
+`main` 分支为开发版，包含最新功能与修复，尚未作为正式 Release 发布。已有正式版本仍为 [v1.0.0](https://github.com/mzer0-yu/LanBridge/releases/tag/v1.0.0)，其下载包不包含当前全部开发改动。
 
 > 采用 [MIT 许可证](LICENSE)，欢迎使用、修改、分享和参与开发。本项目不是 Cloudflare 官方产品。
 
@@ -14,7 +16,7 @@ LanBridge 是面向 Windows 的自托管 Cloudflare Tunnel 管理工具。把 NA
 
 | 功能 | 用途 |
 | --- | --- |
-| 多网站转发 | 将不同公网子域名映射到不同局域网源站，支持 HTTP / HTTPS 和 WebSocket / WSS |
+| 多网站转发 | 将公网根域名或不同子域名映射到对应局域网源站，支持 HTTP / HTTPS 和 WebSocket / WSS |
 | Cloudflare 配置管理 | 接入账户，准备 Tunnel、DNS 与 Turnstile，预览变更、发布并核验 |
 | 网页访问保护 | 人类验证、可选访问口令、国家/IP 访问策略与请求限速 |
 | 网站暂停与恢复 | 暂停某个网站的转发并保留配置，不必删除网站 |
@@ -103,7 +105,7 @@ Get-FileHash -Algorithm SHA256 .\LanBridge-v1.0.0-source.zip
 
 ### 3. 接入 Cloudflare
 
-在“账户与配置”接入 Cloudflare，可使用浏览器授权，或提供所需权限的 API Token。按页面引导选择账户与域名区域，完成配置检查。
+在“账户与配置”接入 Cloudflare，可使用浏览器授权，或提供所需权限的 API Token。浏览器授权后自动复用本机隧道配置或创建专用隧道，并加密保存连接令牌；配置失败可继续配置，无需重复授权。手动 API Token 接入按页面引导完成配置检查。
 
 cloudflared 的自定义路径可留空，通过界面检测或从 Cloudflare 官方发布准备连接器，也可指定已有的 `cloudflared.exe`。连接器二进制保存在本机，不包含在源码包内。
 
@@ -259,3 +261,5 @@ The source release requires Python 3.12+, a Cloudflare account and a domain. Ins
 The management port defaults to `8890`, and the forwarding gateway to `8891`; both listen on loopback. Port settings and connector auto-start can be managed locally. Each data directory allows one service instance, and each installation directory allows one launcher window per Windows user session.
 
 See the [user guide](docs/user-guide.md), [Agent startup guide](docs/agent-startup.md) and [security notes](SECURITY.md). Licensed under the [MIT License](LICENSE). LanBridge is not an official Cloudflare product.
+
+更新机制与 CLI 关闭方式见 [自动重载说明](docs/hot-reload.md)。默认检测普通源码更新并受控重载，允许短暂中断；首次加载此机制需要重启一次。

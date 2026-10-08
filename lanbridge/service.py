@@ -49,6 +49,10 @@ def lan_address(host):
     return str(addresses[0])
 
 
+def hostname_in_zone(hostname, zone_name):
+    return bool(zone_name) and (hostname == zone_name or hostname.endswith("." + zone_name))
+
+
 def pinned_origin(site, settings):
     u = urlsplit(site["origin"])
     port = u.port or (443 if u.scheme == "https" else 80)
@@ -67,7 +71,7 @@ class Cloudflare:
     def __init__(self, service):
         self.service = service
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, *, force_write=False):
         if "/challenges/widgets" in path:
             kind = (self.service.store.get("managed_business_token") or {}).get("kind")
             if kind == "account":
@@ -75,7 +79,7 @@ class Cloudflare:
             if kind == "oauth" and not self.widgets_authorized():
                 raise ValueError("当前浏览器授权缺少 Turnstile 权限，请点击“自动配置人类验证”补充授权，随后自动创建并保存密钥。")
         sensitive_read = path.endswith("/token") or "/challenges/widgets" in path
-        credential = "cf_read_token" if method == "GET" and not sensitive_read else "cf_write_token"
+        credential = "cf_read_token" if method == "GET" and not sensitive_read and not force_write else "cf_write_token"
         token = self.service.store.secret(credential)
         if not token and method == "GET":
             credential = "cf_write_token"
@@ -133,12 +137,16 @@ class Cloudflare:
             operation, permission = "访问 Turnstile", "账户 → Turnstile → 编辑，账户资源需包含配置的 Account ID"
         elif "/dns_records" in path:
             operation, permission = "访问 DNS", "区域 → DNS → 编辑，区域资源需包含配置的 Zone"
+        elif method == "POST" and path == "/zones":
+            operation, permission = "创建域名区域", "区域 → Zone → 编辑，资源范围需包含新域名和目标账户"
         else:
             operation, permission = "读取域名", "区域 → Zone → 读取，区域资源需包含配置的 Zone"
         name = "浏览器 OAuth 授权" if credential == "oauth" else "只读 API Token" if credential == "cf_read_token" else "写入 API Token"
         prefix = f"Cloudflare API HTTP {response.status_code}：{operation}失败（使用{name}"
         prefix += ("，错误码 " + ",".join(codes[:3]) if codes else "") + "）。"
         if credential == "oauth" and response.status_code in (401, 403):
+            if response.status_code == 403 and method == 'POST' and path == '/zones':
+                return prefix + '创建新域名需要目标账户的域名创建权限。若使用未包含 Zone 编辑（zone.write）的旧版浏览器授权，请在“修改接入方式”重新浏览器授权以申请新增权限。续期不会扩大权限；若仍失败，请核对账户角色与资源范围。'
             return prefix + "请重新浏览器授权并核对资源范围及账户角色；无需提供 API Tokens Write 令牌。"
         if response.status_code == 403:
             return prefix + "请核对令牌权限：" + permission + "。若已授予，请检查令牌有效期及客户端 IP 限制；更新后在设置中更换令牌再重试。"
@@ -152,12 +160,12 @@ class Cloudflare:
             raise ValueError("请配置账户并创建独立 Tunnel")
         return f'/accounts/{cfg["account_id"]}/cfd_tunnel/{cfg["tunnel_id"]}'
 
-    def zone(self, selected=None):
+    def zone(self, selected=None, *, force_write=False):
         cfg = self.service.settings()
         selected = selected or {"zone_id": cfg["zone_id"], "zone_name": cfg["zone_name"]}
         if not selected["zone_id"]:
             raise ValueError("请配置 Zone ID")
-        result = self.request("GET", f'/zones/{selected["zone_id"]}')
+        result = self.request("GET", f'/zones/{selected["zone_id"]}', force_write=True) if force_write else self.request("GET", f'/zones/{selected["zone_id"]}')
         if result.get("name") != selected["zone_name"] or result.get("account", {}).get("id") != cfg["account_id"]:
             raise ValueError("域名、Zone ID 和账户 ID 不匹配")
         if result.get("status") != "active":
@@ -534,6 +542,10 @@ class Service:
             raise
         self.cf = Cloudflare(self)
         self.connector = Connector(self)
+        from .domain_onboarding import DomainOnboarding
+        self.domain_onboarding = DomainOnboarding(self)
+        from .site_publication import SitePublication
+        self.site_publication = SitePublication(self)
 
     def set_public_client_enabled(self, enabled):
         if not isinstance(enabled, bool):
@@ -644,6 +656,24 @@ class Service:
             self.store.audit("admin_port_scheduled", {"port": port})
             return {"saved": True, "pending_admin_port": pending, "restart_required": bool(pending)}
 
+    def oauth_refresh_status(self):
+        owned = self.store.get("managed_business_token") or {}
+        issue = self.store.get("oauth_refresh_issue")
+        cfg = self.settings()
+        if owned.get("kind") != "oauth" or not issue or issue.get("context") != [cfg["account_id"], cfg["zone_id"]] or issue.get("credential_digest") != digest(self.store.secret("cf_write_token")):
+            return None
+        usable = issue.get("expires_at", 0) > time.time() + 30
+        message = ("自动续期暂未完成，当前管理授权仍可使用。" if usable else "自动续期未完成，Cloudflare 云端管理操作暂不可用。")
+        message += "添加域名、发布配置等云端管理操作需要有效授权。管理员登录和已运行的转发不受此次续期失败影响。"
+        message += "请检查网络并重试续期；仍失败时再重新授权。"
+        from .browser_auth import REFRESH_REASONS
+        reason = issue.get('reason') if issue.get('reason') in REFRESH_REASONS else None
+        if reason:
+            message += ' ' + REFRESH_REASONS[reason]
+        return {"phase": "warning" if usable else "error", "message": message, "retry_failed": bool(issue.get("retry_failed")),
+                "reason": reason,
+                "checked_at": issue["checked_at"]}
+
     def permission_issues(self):
         cfg = self.settings()
         result = []
@@ -658,28 +688,37 @@ class Service:
             result.append({k: issue[k] for k in ("detail", "http_status", "credential", "checked_at")} | {"status": "needs_recheck" if replaced else "last_failure"})
         return result
 
-    def sites(self):
-        cfg = self.settings()
+    def sites(self, cfg=None):
+        cfg = self.settings() if cfg is None else cfg
         return [dict(site, protocols=site.get("protocols", ["http", "websocket"]),
-                     zone_id=site.get("zone_id") or (cfg["zone_id"] if cfg["zone_name"] and site["hostname"].endswith("." + cfg["zone_name"]) else ""))
+                     zone_id=site.get("zone_id") or (cfg["zone_id"] if hostname_in_zone(site["hostname"], cfg["zone_name"]) else ""))
                 for site in self.store.get("sites", [])]
 
     def site_zone(self, site):
         zones = self.settings()["zones"]
         # Exact label boundary and most specific zone prevent overlapping-zone ambiguity.
-        matches = [z for z in zones if site["hostname"].endswith("." + z["zone_name"])]
+        matches = [z for z in zones if hostname_in_zone(site["hostname"], z["zone_name"])]
         selected = next((z for z in matches if z["zone_id"] == site.get("zone_id")), None) if site.get("zone_id") else max(matches, key=lambda z: len(z["zone_name"]), default=None)
         if not selected:
+            requested = next((z for z in zones if z["zone_id"] == site.get("zone_id")), None)
+            if site.get("zone_id") and not requested:
+                raise ValueError("所选域名已不在已接入列表中，请刷新页面后重新选择所属域名")
+            if requested:
+                raise ValueError("公网域名 " + site["hostname"] + " 不属于所选域名 " + requested["zone_name"] + "，请核对所属域名与公网域名")
             raise ValueError("公网域名必须属于已接入的域名；请在账户与配置中添加域名")
         return selected
 
-    def add_zone(self, data):
+    def add_zone(self, data, *, force_write=False):
         selected = Zone(**data).model_dump()
         with self.lock:
             cfg = self.settings()
+            previous = dict(cfg)
             if not cfg["account_id"]:
                 raise ValueError("请先配置 Cloudflare 账户")
-            self.cf.zone(selected)
+            if force_write:
+                self.cf.zone(selected, force_write=True)
+            else:
+                self.cf.zone(selected)
             existing = next((z for z in cfg["zones"] if z["zone_id"] == selected["zone_id"] or z["zone_name"] == selected["zone_name"]), None)
             if existing and existing != selected:
                 raise ValueError("域名或 Zone ID 与已有配置冲突")
@@ -690,8 +729,38 @@ class Service:
                 if not cfg["zone_id"]:
                     cfg.update(selected)
                 cfg = Settings(**cfg).model_dump()
-                self.store.set("settings", cfg)
+                self._save_zone_settings(cfg, previous)
                 self.store.audit("zone_added", selected)
+            return cfg
+
+    def _save_zone_settings(self, cfg, previous, extra_values=None):
+        # The default is a local selection, not a change to remote token permissions.
+        values = {"settings": cfg, **(extra_values or {})}
+        if cfg["zone_id"] != previous["zone_id"]:
+            for key in ("managed_business_token", "managed_read_token"):
+                owned = self.store.get(key) or {}
+                if owned and owned.get("account_id") == cfg["account_id"] and owned.get("zone_id") == previous["zone_id"]:
+                    values[key] = owned | {"zone_id": cfg["zone_id"]}
+        self.store.set_many(values)
+
+    def set_default_zone(self, zone_id):
+        with self.lock:
+            previous = self.settings()
+            selected = next((z for z in previous["zones"] if z["zone_id"] == zone_id), None)
+            if not selected:
+                raise ValueError("域名不在已接入列表中，请刷新后重试")
+            if zone_id == previous["zone_id"]:
+                return previous
+            # Pin old implicit associations before changing the compatibility default.
+            extra = {}
+            if any(not s.get("zone_id") for s in self.store.get("sites", [])):
+                sites = self.sites()
+                for site in sites:
+                    site["zone_id"] = self.site_zone(site)["zone_id"]
+                extra["sites"] = sites
+            cfg = Settings(**(previous | selected)).model_dump()
+            self._save_zone_settings(cfg, previous, extra)
+            self.store.audit("default_zone_changed", selected)
             return cfg
 
     def remove_zone(self, zone_id):
@@ -700,19 +769,33 @@ class Service:
             selected = next((z for z in cfg["zones"] if z["zone_id"] == zone_id), None)
             if not selected:
                 raise ValueError("域名不存在")
-            if any(self.site_zone(s)["zone_id"] == zone_id for s in self.sites()) or any(host.endswith("." + selected["zone_name"]) for host in self.store.get("published_hosts", [])):
-                raise ValueError("域名仍被网站或已发布路由使用，不能移除")
-            if zone_id == cfg["zone_id"]:
-                raise ValueError("默认域名用于隧道与凭据绑定，不能直接移除")
+            sites = [s["hostname"] for s in self.sites() if self.site_zone(s)["zone_id"] == zone_id]
+            routes = [host for host in self.store.get("published_hosts", []) if hostname_in_zone(host, selected["zone_name"])]
+            if sites or routes:
+                linked = list(dict.fromkeys(sites + routes))
+                raise ValueError("域名仍被网站或已发布路由使用，不能移除：" + "、".join(linked[:5]) + ("等" if len(linked) > 5 else ""))
+            previous = dict(cfg)
             cfg["zones"] = [z for z in cfg["zones"] if z["zone_id"] != zone_id]
-            self.store.set("settings", cfg)
+            if zone_id == cfg["zone_id"]:
+                cfg.update(cfg["zones"][0] if cfg["zones"] else {"zone_id": "", "zone_name": ""})
+            cfg = Settings(**cfg).model_dump()
+            self._save_zone_settings(cfg, previous)
             self.store.audit("zone_removed", selected)
             return cfg
 
-    def cloudflare_setup(self):
-        cfg = self.settings()
+    def configuration_snapshot(self):
+        """Read connection inputs once, without returning decrypted credentials."""
+        with self.store.lock:
+            cfg = self.settings()
+            credentials = {key: bool(self.store.secret(key)) for key in
+                           ('cf_read_token', 'cf_write_token', 'turnstile_secret', 'tunnel_token')}
+            return {'settings': cfg, 'sites': self.sites(cfg), 'credentials': credentials,
+                    'cloudflare_setup': self.cloudflare_setup(cfg, credentials['cf_write_token'])}
+
+    def cloudflare_setup(self, cfg=None, has_write=None):
+        cfg = self.settings() if cfg is None else cfg
         missing = [label for key, label in (("account_id", "Account ID"), ("zone_id", "Zone ID"), ("zone_name", "Zone 名称")) if not cfg[key]]
-        if not self.store.secret("cf_write_token"):
+        if not (bool(self.store.secret('cf_write_token')) if has_write is None else has_write):
             missing.append("写入 API Token")
         return {"ready": not missing, "missing": missing}
 
@@ -733,7 +816,8 @@ class Service:
             body = dict(body)
             existing = next((s for s in self.sites() if s["id"] == body.get("id")), None)
             body.setdefault("target", (existing or {}).get("target", "website"))
-            body.setdefault("zone_id", (existing or {}).get("zone_id", ""))
+            hostname_changed = existing and isinstance(body.get("hostname"), str) and body["hostname"].strip().lower().rstrip(".") != existing["hostname"]
+            body.setdefault("zone_id", "" if hostname_changed else (existing or {}).get("zone_id", ""))
             if body["target"] == "lanbridge":
                 body["origin"] = f'http://127.0.0.1:{self.settings()["admin_port"]}'
                 body["protocols"] = ["http"]
@@ -751,8 +835,6 @@ class Service:
                 site["paused"] = old.get("paused", False)
             if old and "protocols" not in body:
                 site["protocols"] = old.get("protocols", ["http", "websocket"])
-            if old and old["hostname"] != site["hostname"]:
-                raise ValueError("已有网站不可更改域名，请停用旧网站后新建")
             site["id"] = site["id"] or secrets.token_hex(8)
             if any(s["hostname"] == site["hostname"] and s["id"] != site["id"] for s in current):
                 raise ValueError("域名已被另一个网站使用")

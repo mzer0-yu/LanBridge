@@ -19,7 +19,19 @@ from .service import digest
 from .models import Settings
 
 VERSION = "1.0.0-beta.12"
-SCOPES = ["account:read", "argotunnel.write", "teams-connector-cloudflared.write", "dns.write", "zone.read", "challenge-widgets.write"]
+SCOPES = ["account:read", "argotunnel.write", "teams-connector-cloudflared.write", "dns.write", "zone.read", "zone.write", "challenge-widgets.write"]
+
+REFRESH_REASONS = {
+    "invalid_grant": "Cloudflare 拒绝了刷新凭据，需要重新授权。",
+    "invalid_client": "Cloudflare 拒绝了授权客户端，需要重新授权。",
+    "network": "续期请求遇到网络连接错误，可稍后重试。",
+    "timeout": "续期请求超时，可稍后重试。",
+    "cli_failure": "官方授权工具执行失败，尚不能判断刷新凭据是否失效。",
+    "profile_invalid": "官方工具未返回有效的新授权，尚不能判断刷新凭据是否失效。",
+}
+
+class OAuthContextChanged(ValueError):
+    pass
 
 
 class BrowserAuth:
@@ -33,8 +45,12 @@ class BrowserAuth:
         self.selection_ready = threading.Event()
         self.zone_choices = []
         self.selected_zone = None
+        self.setup_context = service.store.get('browser_auth_setup_context')
         previous = service.store.get("browser_auth_job", {})
-        if previous.get("phase") in ("preparing", "authorizing", "choosing_zone", "creating", "cancelling"):
+        if previous.get('authorization_saved') and previous.get('phase') == 'creating' and self.setup_context == self._setup_context():
+            self.update('error', 'Cloudflare 授权已保存，自动配置尚未完成，可继续配置。',
+                        authorization_saved=True, next_action='configure_tunnel')
+        elif previous.get("phase") in ("preparing", "authorizing", "choosing_zone", "creating", "cancelling"):
             self.update("error", "上次浏览器授权被服务重启中断。若已有创建结果未知记录，请先在 Cloudflare 核对。")
         elif previous.get("next_action") == "token_authority":
             self.update("error", "旧流程在令牌转授阶段失败。现在直接使用浏览器授权，请重新授权一次完成接入，无需另行提供授权令牌。", next_action="reauthorize")
@@ -45,11 +61,38 @@ class BrowserAuth:
     def status(self):
         return self.service.store.get("browser_auth_job", {"phase": "idle", "message": "在 Cloudflare 官方页面授权一次，自动接入并刷新凭据，无需粘贴令牌。"})
 
+    @staticmethod
+    def node_runtime(project):
+        candidates = [project / "bin" / "node-runtime" / ("node.exe" if os.name == "nt" else "node")]
+        system = shutil.which("node")
+        if system:
+            candidates.append(Path(system))
+        if os.name == "nt":
+            for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+                if os.environ.get(key):
+                    candidates.append(Path(os.environ[key]) / ("Programs/nodejs" if key == "LOCALAPPDATA" else "nodejs") / "node.exe")
+        env = {k:v for k,v in os.environ.items() if k not in ("NODE_OPTIONS", "NODE_PATH")}
+        found = False
+        for node in dict.fromkeys(candidates):
+            if not node.is_file():
+                continue
+            found = True
+            try:
+                result = subprocess.run([str(node), "--version"], capture_output=True, timeout=10,
+                    env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                match = re.fullmatch(rb"v(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
+                if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (22, 18, 0):
+                    return str(node)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        if found:
+            raise ValueError("未找到可运行的 Node.js 22.18 或更高版本，请更新 Node.js，或在 bin/node-runtime 放置兼容运行时后重试。")
+        raise ValueError("未找到 Node.js 运行时，请安装 Node.js 22.18 或更高版本，或在 bin/node-runtime 放置兼容运行时后重试。")
+
     def command(self):
-        node = shutil.which("node")
-        if not node:
-            raise ValueError("浏览器授权需要 Node.js 22.18 或更高版本，请安装后重试。")
-        root = Path(__file__).resolve().parents[1] / "bin" / "cf-runtime"
+        project = Path(__file__).resolve().parents[1]
+        node = self.node_runtime(project)
+        root = project / "bin" / "cf-runtime"
         entry = root / "node_modules" / "cf" / "bin" / "cf"
         if not entry.is_file():
             root.mkdir(parents=True, exist_ok=True)
@@ -90,19 +133,21 @@ class BrowserAuth:
         output = [bytearray(), bytearray()]
         errors = []
         opened = threading.Event()
+        launch_lock = threading.Lock()
 
         def read(stream, index):
             try:
                 for line in iter(stream.readline, b""):
                     output[index].extend(line[:max(0, 65536-len(output[index]))])
                     match = re.search(rb"https://dash\.cloudflare\.com/oauth2/auth\?[^\s\x1b]+", line)
-                    if index == 0 and match and not opened.is_set():
-                        if self.cancelled.is_set():
-                            continue
-                        opened.set()
-                        if not open_browser(match.group().decode("utf-8"), browser):
-                            errors.append("所选浏览器未能打开，请检查安装后重新授权。")
-                            process.kill()
+                    if match:
+                        with launch_lock:
+                            if self.cancelled.is_set() or opened.is_set():
+                                continue
+                            opened.set()
+                            if not open_browser(match.group().decode("utf-8"), browser):
+                                errors.append("所选浏览器未能打开，请检查安装后重新授权。")
+                                process.kill()
             except (OSError, ValueError, UnicodeError):
                 errors.append("无法打开授权页，请重新授权。")
                 try:
@@ -143,6 +188,8 @@ class BrowserAuth:
                 out, err = self.communicate_browser(self.process, self.browser, timeout)
             else:
                 out, err = self.process.communicate(timeout=timeout)
+            if getattr(self, 'refresh_diagnostics', False):
+                self.refresh_reason = self.classify_refresh_error(out + err)
             if self.process.returncode or self.cancelled.is_set():
                 if args[:2] == ["auth", "create"] and not self.cancelled.is_set():
                     output = (out + err).decode("utf-8", errors="replace").lower()
@@ -151,6 +198,8 @@ class BrowserAuth:
                 raise ValueError("Cloudflare 授权或 API 操作失败，请检查浏览器授权、账户角色及网络后重试。")
             return out.decode("utf-8", errors="replace").strip()
         except subprocess.TimeoutExpired:
+            if getattr(self, 'refresh_diagnostics', False):
+                self.refresh_reason = 'timeout'
             self.process.kill()
             self.process.communicate()
             if args[:2] == ["auth", "create"]:
@@ -176,6 +225,18 @@ class BrowserAuth:
                             pass
 
     @staticmethod
+    def classify_refresh_error(output):
+        text = output.decode('utf-8', errors='replace').lower()
+        for code in ('invalid_grant', 'invalid_client'):
+            if re.search(r'oauth error:\s*' + code + r'\b', text):
+                return code
+        if any(code in text for code in ('fetch failed', 'enotfound', 'econnreset', 'econnrefused', 'certificate')):
+            return 'network'
+        if any(code in text for code in ('etimedout', 'connect timeout', 'request timed out')):
+            return 'timeout'
+        return None
+
+    @staticmethod
     def payload(output):
         try:
             value = json.loads(output)
@@ -199,6 +260,8 @@ class BrowserAuth:
             self.selection_ready.clear()
             self.zone_choices = []
             self.selected_zone = None
+            self.setup_context = None
+            self.service.store.set('browser_auth_setup_context', None)
             self.update("preparing", "正在准备官方 Cloudflare 授权工具…")
             cfg = cfg | {"credential_digest": digest(self.service.store.secret("cf_write_token"))}
             self.thread = threading.Thread(target=self.worker, args=(cfg,), daemon=True)
@@ -242,6 +305,40 @@ class BrowserAuth:
         if process and process.poll() is None:
             process.terminate()
 
+    def _setup_context(self):
+        cfg = self.service.settings()
+        return digest([cfg['account_id'], cfg['zone_id'], self.service.store.secret('cf_write_token')])
+
+    def continue_setup(self):
+        with self.gate, self.service.lock:
+            job = self.status()
+            if self.thread and self.thread.is_alive():
+                raise ValueError("自动配置正在进行，请稍候")
+            if job.get('next_action') != 'configure_tunnel' or not self.setup_context or self.setup_context != self._setup_context():
+                raise ValueError("授权或账户已变化，请重新授权或使用隧道令牌中的配置入口")
+            self.update('creating', '授权已保存，正在继续配置隧道…', authorization_saved=True)
+            self.thread = threading.Thread(target=self.complete_setup, daemon=True)
+            self.thread.start()
+            return self.status()
+
+    def complete_setup(self):
+        try:
+            with self.service.lock:
+                if not self.setup_context or self.setup_context != self._setup_context():
+                    raise ValueError('账户或授权已变化，已停止自动配置')
+                cfg = self.service.settings()
+                if not cfg['tunnel_id'] or not self.service.store.secret('tunnel_token'):
+                    self.update('creating', '授权已保存，正在配置专用隧道并保存连接令牌…', authorization_saved=True)
+                    self.service.cf.create_tunnel()
+                if any(site['enabled'] and site['human_check'] for site in self.service.sites()):
+                    self.update('creating', '隧道已配置，正在同步人类验证…', authorization_saved=True)
+                    self.service.cf.create_widget()
+            self.update('done', '本次授权已完成，隧道连接令牌已保存。', authorization_saved=True, tunnel_ready=True)
+        except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+            detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else '请检查网络及本机存储后重试。'
+            self.update('error', 'Cloudflare 授权已保存，但自动配置未完成：' + detail,
+                        authorization_saved=True, next_action='configure_tunnel')
+
     def worker(self, cfg):
         store = self.service.store
         command = None
@@ -263,7 +360,7 @@ class BrowserAuth:
                     raise ValueError("无法核对浏览器实际授予的权限范围；请重新发起浏览器授权。")
                 # Retain only our known scope names, never the identity/email or raw CLI output.
                 diagnostics = {"granted_scopes": [scope for scope in SCOPES if scope in granted]}
-                needed = {"dns.write", "zone.read", "challenge-widgets.write"}
+                needed = {"dns.write", "zone.read", "zone.write", "challenge-widgets.write"}
                 missing = needed.difference(granted)
                 if not any(scope in granted for scope in ("argotunnel.write", "teams-connector-cloudflared.write")):
                     missing.add("Tunnel Write")
@@ -302,10 +399,9 @@ class BrowserAuth:
                     settings = Settings(**(current | {k: cfg[k] for k in ("account_id", "zone_id", "zone_name")})).model_dump()
                     self.save_profile(snapshot, settings, settings=settings)
                     store.audit("browser_oauth_connected", {"account_id": cfg["account_id"], "zone_id": cfg["zone_id"]})
-                if any(site["enabled"] and site["human_check"] for site in self.service.sites()):
-                    self.update("creating", "授权已保存，正在自动创建或同步人类验证并加密保存密钥…")
-                    self.service.cf.create_widget()
-                self.update("done", "Cloudflare 已连接，账户与域名已配置；凭据自动刷新。")
+                    self.setup_context = self._setup_context()
+                    store.set('browser_auth_setup_context', self.setup_context)
+                self.complete_setup()
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError, sqlite3.Error) as exc:
             message = str(exc) if isinstance(exc, ValueError) else "浏览器授权失败，请检查 Node.js、官方 CLI 安装和网络后重试。"
             if store.get("pending_browser_token"):
@@ -403,12 +499,13 @@ class BrowserAuth:
         owned = {"kind": "oauth", "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "updated_at": time.time(), "credential_digest": digest(token), "scopes": [s for s in SCOPES if s in snapshot["profile"]["scopes"]]}
         with store.lock:
             values = {"managed_business_token": owned,
-                      "credential_updated_at": store.get("credential_updated_at", {}) | {"cf_write_token": time.time()}}
+                      "credential_updated_at": store.get("credential_updated_at", {}) | {"cf_write_token": time.time()},
+                      "oauth_refresh_issue": None}
             if settings is not None:
                 values.update(settings=settings, token_management_error=None)
             store.set_many(values, secret_values={"cf_write_token": token, "cf_oauth_profile": json.dumps(snapshot)})
 
-    def access_token(self):
+    def access_token(self, *, force_refresh=False):
         with self.service.lock:
             store = self.service.store
             owned = store.get("managed_business_token") or {}
@@ -420,11 +517,17 @@ class BrowserAuth:
                 expires = datetime.fromisoformat(snapshot["profile"]["expiration_time"].replace("Z", "+00:00")).timestamp()
             except (ValueError, KeyError, TypeError):
                 raise ValueError("浏览器授权配置无效，请重新授权。") from None
-            if expires > time.time() + 90:
+            if not force_refresh and expires > time.time() + 90:
                 return snapshot["profile"]["oauth_token"]
+            issue = store.get('oauth_refresh_issue') or {}
+            if not force_refresh and issue.get('credential_digest') == digest(snapshot['profile']['oauth_token']) and issue.get('context') == [cfg['account_id'], cfg['zone_id']] and issue.get('retry_after', 0) > time.time():
+                if expires > time.time() + 30:
+                    return snapshot['profile']['oauth_token']
+                raise ValueError(issue['message'])
             # Independent runner: refresh cannot overwrite/cancel an ongoing login process.
             runner = BrowserAuth.__new__(BrowserAuth)
             runner.service, runner.process, runner.cancelled = self.service, None, threading.Event()
+            runner.refresh_diagnostics, runner.refresh_reason = True, None
             root = store.root / "browser-auth"
             protect_directory(root)
             try:
@@ -434,13 +537,43 @@ class BrowserAuth:
                     if not path.resolve().is_relative_to(directory.resolve()) or path.name != "lanbridge.json":
                         raise ValueError("授权配置路径无效")
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(json.dumps(snapshot["profile"]), encoding="utf-8")
-                    runner.run(runner.command(), runner.environment(directory, cfg["account_id"]), directory, ["auth", "whoami", "--profile", "lanbridge"])
+                    # whoami refreshes only expired profiles. Expire the isolated copy
+                    # so early renewal and an explicit retry cannot silently reuse it.
+                    profile = snapshot['profile'] | {'expiration_time':'1970-01-01T00:00:00Z'}
+                    path.write_text(json.dumps(profile), encoding="utf-8")
+                    env = runner.environment(directory, cfg['account_id'])
+                    env['DEBUG'] = '1'  # Private capture; retain only fixed reason codes.
+                    runner.run(runner.command(), env, directory, ["auth", "whoami", "--profile", "lanbridge"])
+                    runner.refresh_reason = runner.refresh_reason or 'profile_invalid'
                     refreshed = runner.read_profile(directory)
                     expiry = datetime.fromisoformat(refreshed["profile"]["expiration_time"].replace("Z", "+00:00")).timestamp()
                     if expiry <= time.time() + 30:
                         raise ValueError("授权未刷新")
-                    self.save_profile(refreshed, cfg)
+                    with store.lock:
+                        current = self.service.settings()
+                        if json.loads(store.secret('cf_oauth_profile') or '{}') != snapshot or any(current[k] != cfg[k] for k in ('account_id','zone_id')):
+                            raise OAuthContextChanged('续期期间授权或账户已变化，请使用当前授权重试')
+                        self.save_profile(refreshed, cfg)
                     return refreshed["profile"]["oauth_token"]
+            except OAuthContextChanged:
+                raise
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError):
-                raise ValueError("浏览器授权自动刷新失败，请重新浏览器授权；无需提供 API Tokens Write 令牌。") from None
+                # A failed early renewal does not invalidate a still usable access token.
+                usable = expires > time.time() + 30
+                message = ("Cloudflare 管理授权暂未续期，当前授权仍可使用。请检查网络后重试续期，仍失败再重新授权。"
+                           if usable else "Cloudflare 管理授权未能自动续期，暂时无法执行云端管理操作。请先检查网络并重试续期，仍失败再重新授权。")
+                message += " LanBridge 管理员登录不受影响，已运行的转发不会因此停止。"
+                reason = runner.refresh_reason or 'cli_failure'
+                message += ' ' + REFRESH_REASONS[reason]
+                with store.lock:
+                    current = self.service.settings()
+                    if json.loads(store.secret('cf_oauth_profile') or '{}') != snapshot or any(current[k] != cfg[k] for k in ('account_id','zone_id')):
+                        raise OAuthContextChanged('续期期间授权或账户已变化，请使用当前授权重试') from None
+                    store.set("oauth_refresh_issue", {"message": message, "expires_at": expires,
+                              "reason": reason, "retry_after": time.time()+30,
+                              "checked_at": time.time(), "retry_failed": bool(force_refresh or (store.get("oauth_refresh_issue") or {}).get("retry_failed")), "context": [cfg["account_id"], cfg["zone_id"]],
+                              "credential_digest": digest(snapshot["profile"]["oauth_token"])})
+                    store.audit('oauth_refresh_failed', {'reason':reason, 'manual_retry':force_refresh})
+                if usable and not force_refresh:
+                    return snapshot["profile"]["oauth_token"]
+                raise ValueError(message) from None

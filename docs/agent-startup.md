@@ -103,3 +103,7 @@ if ($LASTEXITCODE -ne 0) { throw '操作未确认完成，重新检测目标实�
 - `serve` 前台长期运行，stdout 可能包含地址或复用说明；后台确认使用 `--startup-result`，不能依赖 `pythonw.exe` 的 stdout。
 - 管理服务运行时，网站/Cloudflare 配置修改使用已认证 API 或 MCP；普通 CLI 配置写命令需先停止服务。`instances`、`open-existing`、`control` 是运行管理例外，可在服务运行时调用。
 - 打开管理台不等于已登录。远程 Agent 使用授权的公网 API/临时 Token；需要本机启动、端口或进程控制时由本机 Agent 执行。
+
+## 源码更新
+
+普通源码变化默认触发受控自动重载，实例身份会变化，控制前重新运行 `instances` 核对。`serve --no-hot-reload` 禁用自动执行，状态提示更新待生效。不可将自动重载当作发布验证或源码自动回滚。具体行为见 [自动重载](hot-reload.md)。

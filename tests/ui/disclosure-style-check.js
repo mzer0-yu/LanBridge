@@ -38,11 +38,40 @@ async function main() {
         assert.equal(state.bottom,'0px',`${detail.label} bottom border, open=${state.open}`);
       }
       await page.locator('nav [data-view=settings]').click();
+      // Sibling card gaps must stay equal with any combination of expanded bodies.
+      for(let mask=0;mask<4;mask++){
+        const gaps=await page.evaluate(mask=>{
+          const cards=['#domain-onboarding','#account-config-details'].map(s=>document.querySelector(s));
+          cards.forEach((el,i)=>el.open=!!(mask&(1<<i)));
+          return cards.slice(1).map((el,i)=>el.getBoundingClientRect().top-cards[i].getBoundingClientRect().bottom);
+        },mask);
+        for(const gap of gaps)assert(Math.abs(gap-12)<1,`Sibling disclosure gap ${gap}px at ${width}px, state ${mask}`);
+      }
+      await page.evaluate(()=>{for(const el of document.querySelectorAll('#cloudflare-account-panel>details'))el.open=false});
+      await page.locator('#cloudflare-account-panel').screenshot({path:path.join(artifacts,`account-collapsed-spacing-${width}.png`)});
       const custom = page.locator('.connector-software>details');
       await custom.locator('summary').click();
       assert(await custom.locator('.advanced-body').isVisible());
       await page.locator('.connector-software').screenshot({path:path.join(artifacts,`custom-path-${width}.png`)});
       await page.locator('#account-config-details>summary').click();
+      assert.equal(await page.locator('#account-config-toggle').textContent(),'Cloudflare 授权与连接');
+      assert.equal(await page.locator('#account-config-details #tunnel-maintenance').count(),1);
+      assert.equal(await page.locator('#tunnel-maintenance').evaluate(el=>el.open),false);
+      await page.locator('#tunnel-maintenance>summary').click();
+      assert(await page.locator('#tunnel-token-refresh').isVisible());
+      const maintenanceGap=await page.locator('#tunnel-maintenance').evaluate(el=>{
+        let previous=el.previousElementSibling;
+        while(previous&&previous.getBoundingClientRect().height===0)previous=previous.previousElementSibling;
+        return el.getBoundingClientRect().top-previous.getBoundingClientRect().bottom;
+      });
+      assert(Math.abs(maintenanceGap-12)<1,`Nested maintenance gap ${maintenanceGap}px at ${width}px`);
+      await page.locator('#cloudflare-account-panel').screenshot({path:path.join(artifacts,`cloudflare-connection-${width}.png`)});
+      await page.locator('#tunnel-maintenance>summary').click();
+      await page.locator('#account-config-details').evaluate(el=>el.open=false);
+      await page.evaluate(()=>locateTunnelToken());
+      assert(await page.locator('#tunnel-token-refresh').isVisible());
+      assert.equal(await page.locator('#account-config-details').evaluate(el=>el.open),true);
+      await page.locator('#tunnel-maintenance>summary').click();
       await page.locator('#account-use-manual').click();
       await page.locator('#manual-account-config>summary').click();
       await page.locator('#advanced-token-management>summary').click();

@@ -35,6 +35,7 @@ def test_remote_admin_and_client_authentication_and_csrf(service):
         assert client.post(f'/api/sites/{site["id"]}/pause', json={"paused": False}).status_code == 403
         client.headers["X-CSRF-Token"] = login.json()["csrf"]
         assert client.post('/api/password',json={}).status_code==403
+        assert client.post('/api/cloudflare/browser-authorize-refresh',json={}).status_code==403
         issued=client.post('/api/temporary-tokens',json={'name':'remote maintenance'})
         assert issued.status_code==200
         assert client.get('/api/temporary-tokens').status_code==200
@@ -48,7 +49,7 @@ def test_remote_admin_and_client_authentication_and_csrf(service):
 def test_local_operations_never_open_through_remote_admin(service):
     remote_site(service)
     with remote_client(service) as client:
-        for path in ["/api/setup", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/approve", "/api/cloudflare/browser-authorize", "/api/cloudflare/browser-authorize-restart", "/api/shutdown", "/api/launcher/control", "/api/admin-port", "/api/connector-auto-start", "/api/restart", "/api/gateway-port", "/api/gateway-retry"]:
+        for path in ["/api/setup", "/api/local-login/start", "/api/local-login/open", "/api/local-login/poll", "/api/local-login/approve", "/api/cloudflare/browser-authorize", "/api/cloudflare/browser-authorize-restart", "/api/cloudflare/browser-authorize-refresh", "/api/shutdown", "/api/launcher/control", "/api/admin-port", "/api/connector-auto-start", "/api/restart", "/api/gateway-port", "/api/gateway-retry"]:
             assert client.post(path, json={}).status_code == 403
         assert client.get("/api/local-login/browsers").status_code == 403
         assert client.get("/api/state", headers={"Host": "127.0.0.1:8890"}).status_code == 404
@@ -173,9 +174,9 @@ def test_state_sites_and_probes_share_one_read(service, monkeypatch):
     service.store.set("probe_" + site["id"], {"ok": True})
     original = service.sites
     calls = []
-    def read_sites():
+    def read_sites(cfg=None):
         calls.append(True)
-        return original()
+        return original(cfg)
     monkeypatch.setattr(service, "sites", read_sites)
     response = client.get("/api/state")
     assert response.status_code == 200
