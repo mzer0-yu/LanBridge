@@ -783,3 +783,5 @@ button.primary.caution{background:#a34b08;border-color:#a34b08;color:#fff}
 
 #account-config-details .account-authorization-heading{margin:0 0 12px;font-size:14px}
 #account-config-details #tunnel-maintenance{margin:12px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+
+#visitor-protection .overview-metrics{margin-bottom:0}

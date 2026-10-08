@@ -540,6 +540,8 @@ class Service:
         except BaseException:
             self.store.db.close()
             raise
+        from .visitor_risk import VisitorRisk
+        self.visitor_risk = VisitorRisk(self.store)
         self.cf = Cloudflare(self)
         self.connector = Connector(self)
         from .domain_onboarding import DomainOnboarding
@@ -592,11 +594,16 @@ class Service:
     def settings(self):
         return Settings(**self.store.get("settings", {})).model_dump()
 
-    def commit_settings(self, cfg):
+    def commit_settings(self, cfg, *, turnstile_secret=None):
         """Keep visitor invalidation consistent for CLI and API configuration changes."""
         with self.lock:
             cfg = Settings(**cfg).model_dump()
             values, secret_values = {"settings": cfg}, {}
+            if turnstile_secret is not None:
+                if not isinstance(turnstile_secret, str) or not 10 <= len(turnstile_secret.strip()) <= 4096:
+                    raise ValueError("Secret Key 长度或格式无效")
+                secret_values["turnstile_secret"] = turnstile_secret.strip()
+                values["credential_updated_at"] = self.store.get("credential_updated_at", {}) | {"turnstile_secret": time.time()}
             if cfg["turnstile_sitekey"] != self.settings()["turnstile_sitekey"]:
                 sites = self.sites()
                 for site in sites:
@@ -818,6 +825,7 @@ class Service:
             body.setdefault("target", (existing or {}).get("target", "website"))
             hostname_changed = existing and isinstance(body.get("hostname"), str) and body["hostname"].strip().lower().rstrip(".") != existing["hostname"]
             body.setdefault("zone_id", "" if hostname_changed else (existing or {}).get("zone_id", ""))
+            body.setdefault("human_remember_days", (existing or {}).get("human_remember_days", 1))
             if body["target"] == "lanbridge":
                 body["origin"] = f'http://127.0.0.1:{self.settings()["admin_port"]}'
                 body["protocols"] = ["http"]
@@ -854,7 +862,11 @@ class Service:
                     self.cf.create_widget(sites=proposed)
                 except (ValueError, RuntimeError, OSError) as exc:
                     raise ValueError("人类验证配置未完成，网站修改未保存：" + str(exc)) from None
-            site["policy_version"] = secrets.token_hex(8)
+            # Cosmetic edits and no-op saves must not revoke visitor grants.
+            policy_keys = set(Site.model_fields) - {'id', 'name', 'zone_id', 'policy_version'}
+            old_policy = Site(**old).model_dump() if old else {}
+            unchanged = old and not passcode and all(site[key] == old_policy[key] for key in policy_keys)
+            site["policy_version"] = old["policy_version"] if unchanged and old.get("policy_version") else secrets.token_hex(8)
             self.store.set_many({"sites": proposed}, secret_values={"passcode_" + site["id"]: hashed} if passcode else None)
             self.store.audit("site_saved", {"id": site["id"], "hostname": site["hostname"], "enabled": site["enabled"]})
             if auto_publish:

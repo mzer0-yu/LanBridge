@@ -129,3 +129,21 @@ def test_websocket_cross_site_origin_rejected(service):
             with client.websocket_connect("wss://app.example.com/ws", headers={"Origin": "https://evil.example"}):
                 pass
         assert error.value.code == 1008
+
+
+def test_limiter_retry_after_tracks_original_window_without_extending_it(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("lanbridge.gateway.time.monotonic", lambda: now[0])
+    limiter = Limiter()
+    assert limiter.allow("visitor", 1)
+    assert limiter.retry_after("visitor", 1) == 60
+    now[0] = 158.2
+    assert not limiter.allow("visitor", 1)
+    assert limiter.retry_after("visitor", 1) == 2
+    now[0] = 159.8
+    assert not limiter.allow("visitor", 1)
+    assert limiter.retry_after("visitor", 1) == 1
+    assert limiter.retry_after("visitor", 2) == 0
+    now[0] = 160.0
+    assert limiter.retry_after("visitor", 1) == 0
+    assert limiter.allow("visitor", 1)

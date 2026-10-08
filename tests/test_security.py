@@ -395,3 +395,35 @@ def test_malformed_turnstile_result_fails_safely_without_grant(service, monkeypa
     assert "set-cookie" not in response.headers
     assert "private-upstream-message" not in response.text
     assert "private-turnstile-secret" not in response.text
+
+
+def test_settings_verification_pair_commit_and_rollback(service):
+    import sqlite3
+    client = admin_client(service)
+    original = service.settings() | {"tunnel_name": "Keep this name", "turnstile_sitekey": "old-sitekey"}
+    service.commit_settings(original)
+    service.store.set_secret("turnstile_secret", "old-test-secret")
+    response = client.post("/api/settings", json={"turnstile_sitekey": "new-sitekey", "turnstile_secret": "new-test-secret"})
+    assert response.status_code == 200
+    assert service.settings()["turnstile_sitekey"] == "new-sitekey"
+    assert service.settings()["tunnel_name"] == "Keep this name"
+    assert service.store.secret("turnstile_secret") == "new-test-secret"
+    assert "new-test-secret" not in response.text
+    before = service.settings()
+    signing = service.store.secret("signing_key")
+    assert client.post("/api/settings", json={"turnstile_sitekey":"invalid-key", "turnstile_secret":"short"}).status_code == 400
+    assert service.settings() == before
+    with service.store.lock, service.store.db:
+        service.store.db.execute("CREATE TEMP TRIGGER reject_test_secret BEFORE INSERT ON main.secrets WHEN NEW.key='turnstile_secret' BEGIN SELECT RAISE(ABORT,'isolated failure'); END")
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            client.post("/api/settings", json={"turnstile_sitekey":"failed-key", "turnstile_secret":"failed-test-secret"})
+        assert service.settings() == before
+        assert service.store.secret("turnstile_secret") == "new-test-secret"
+        assert service.store.secret("signing_key") == signing
+    finally:
+        with service.store.lock, service.store.db:
+            service.store.db.execute("DROP TRIGGER reject_test_secret")
+    token = client.post('/api/temporary-tokens',json={'permissions':['sites','account']}).json()['token']
+    assert client.post('/api/settings',json={'turnstile_sitekey':'forbidden-key','turnstile_secret':'forbidden-secret'},headers={'Authorization':'Bearer '+token}).status_code == 403
+    assert service.settings() == before

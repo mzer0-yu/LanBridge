@@ -22,6 +22,7 @@ class Site(BaseModel):
     allowed_ips: list[str] = Field(default_factory=list)
     requests_per_minute: int = Field(default=180, ge=10, le=10000)
     session_minutes: int = Field(default=60, ge=5, le=1440)
+    human_remember_days: int = Field(default=1, ge=0, le=30)
     policy_version: str = ""
 
     @field_validator("hostname")

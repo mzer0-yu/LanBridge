@@ -194,3 +194,34 @@ def test_large_export_uses_protected_storage_and_removes_temporary_file(service)
     finally:
         snapshot.close()
     assert not temporary.exists()
+
+
+def test_remote_audit_is_read_only_even_with_forged_local_headers(service):
+    from test_remote_admin import remote_site, remote_client
+    remote_site(service)
+    service.store.audit("preserved_evidence", {"number": 42})
+    with remote_client(service) as client:
+        login = client.post("/api/login", json={"username": "admin", "password": "correct horse battery"})
+        client.headers["X-CSRF-Token"] = login.json()["csrf"]
+        for method, path, payload in [
+            ("POST", "/api/audit/settings", '{"limit_mb":1}'),
+            ("POST", "/api/audit/settings", '{"limit_mb":20}'),
+            ("POST", "/api/audit/settings", '{'),
+            ("POST", "/api/audit/clear", '{}'),
+            ("DELETE", "/api/audit", '{}'),
+            ("PUT", "/api/audit/settings", '{}'),
+        ]:
+            response = client.request(method, path, content=payload, headers={
+                "Content-Type": "application/json", "X-Forwarded-For": "127.0.0.1",
+                "CF-Connecting-IP": "127.0.0.1", "X-Forwarded-Host": "localhost:8890"})
+            assert response.status_code == 403
+            assert "本机管理员" in response.json()["detail"]
+            assert response.headers["cache-control"] == "no-store"
+        assert service.store.audit_stats()["limit_mb"] == 10
+        rows = client.get("/api/audit").json()["records"]
+        assert any(row["action"] == "preserved_evidence" for row in rows)
+        assert sum(row["action"] == "audit_write_rejected" for row in rows) == 1
+        exported = client.get("/api/audit/export")
+        assert exported.status_code == 200 and "preserved_evidence" in exported.text
+    owner = admin_client(service)
+    assert owner.post("/api/audit/settings", json={"limit_mb":20}).status_code == 200

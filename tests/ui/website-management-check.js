@@ -37,6 +37,7 @@ const secret=page.locator('#verification-credentials-form [name=turnstile_secret
 await secret.fill('test-only-saved-secret');await secret.press('Enter');
 await page.waitForFunction(()=>document.querySelector('#verification-feedback').textContent==='人类验证配置已保存');
 assert.equal(await secret.inputValue(),'');
-assert.deepEqual(writes.find(item=>item.path==='/api/credentials').data,{turnstile_secret:'test-only-saved-secret'});
+assert.equal(writes.filter(item=>item.path==='/api/credentials').length,0);
+assert.deepEqual(writes.find(item=>item.path==='/api/settings').data,{turnstile_sitekey:'public-key',turnstile_secret:'test-only-saved-secret'});
 assert.equal(writes.find(item=>item.path==='/api/settings').data.turnstile_sitekey,'public-key');
 await page.setViewportSize({width:390,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.deepEqual(errors,[]);console.log('浏览器实测：网站管理、编辑分区、密钥遮罩输入、编辑/保存反馈及手机布局通过；仅使用模拟 API');await browser.close()})().catch(e=>{console.error(e);process.exit(1)});

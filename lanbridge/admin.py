@@ -85,6 +85,12 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         if not bearer and not public and request.method not in ("GET", "HEAD") and request.headers.get("x-csrf-token") != session["csrf"]:
             return JSONResponse({"detail": "CSRF 校验失败，请刷新管理台"}, 403)
         request.state.session = session
+        if remote and request.method not in ("GET", "HEAD") and (request.url.path == "/api/audit" or request.url.path.startswith("/api/audit/")):
+            # Trusted routing determines locality; forwarded headers cannot grant it.
+            # Bound refusal logging so repeated attempts cannot flood the history.
+            if limiter.allow("remote_audit_write_rejected", 1, window=300):
+                await asyncio.to_thread(service.store.audit, "audit_write_rejected", {"source": "remote"})
+            return JSONResponse({"detail": "日志修改仅支持本机管理员操作"}, 403, headers={"Cache-Control": "no-store"})
         if getattr(service, "restart_plan", None) and request.method not in ("GET", "HEAD"):
             return JSONResponse({"detail": "平台正在重启，请稍候"}, 409)
         if session and session.get("access_token_id") and request.url.path.startswith("/api/"):
@@ -438,6 +444,7 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
                 "browser_auth": browser_auth.status() if browser_auth else {"phase": "local_only", "message": "浏览器授权请在本机完成"},
                 "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token") or service.store.get("pending_browser_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
                 }
+        result["visitor_protection"] = None if limited else service.visitor_risk.snapshot()
         result["site_publication"] = service.site_publication.status()
         result["domain_onboarding"] = None
         if not remote and not limited:
@@ -545,14 +552,15 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
                 if "zones" in data and data["zones"] != old["zones"]:
                     raise ValueError("请通过域名管理添加或移除域名")
                 data["zones"] = old["zones"]
-                cfg = Settings(**data).model_dump()
+                secret = data.pop("turnstile_secret", None)
+                cfg = Settings(**(old | data)).model_dump()
                 if old["account_id"] and old["zones"] and old["account_id"] != cfg["account_id"]:
                     raise ValueError("已接入域名属于当前账户，跨账户请使用独立数据目录")
                 if old["tunnel_id"] and any(old[k] != cfg[k] for k in ("account_id", "zone_id", "zone_name")):
                     raise ValueError("Tunnel 已绑定账户和 Zone，不能直接切换；请使用独立数据目录")
                 if service.sites() and old["zone_name"] != cfg["zone_name"]:
                     raise ValueError("已有网站时不能切换 Zone")
-                service.commit_settings(cfg)
+                service.commit_settings(cfg, turnstile_secret=secret)
                 service.store.audit("settings_saved", {})
             return {"saved": True, "settings": cfg, "cloudflare_setup": service.cloudflare_setup(), "cloudflare_permission_issues": service.permission_issues()}
         return await asyncio.to_thread(save, data)

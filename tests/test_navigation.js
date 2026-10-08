@@ -428,7 +428,7 @@ function localSettingHarness(kind, api, loadState){
   const form={dataset:{dirty:'true'},elements:{[field]:{value:kind==='audit'?'5':'8892'}}};
   const feedback={textContent:'',className:'small'},nodes={[selector]:form,[kind==='audit'?'#audit-storage-feedback':'#gateway-port-feedback']:feedback};
   let unlocks=0;
-  const context={csrf:'old-session',api,loadState,$:key=>nodes[key],lockForm(){},unlockForm(){unlocks++;}};
+  const context={csrf:'old-session',remoteAccess:false,api,loadState,$:key=>nodes[key],lockForm(){},unlockForm(){unlocks++;}};
   vm.createContext(context);
   const helper=source.indexOf('async function saveLocalSetting(');
   if(helper>=0)vm.runInContext(source.slice(helper,source.indexOf("$('#audit-storage-form').onsubmit=",helper)),context);

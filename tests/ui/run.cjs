@@ -4,6 +4,8 @@ const path = require('node:path');
 const checks = [
   'autofill-check.js',
   'website-management-check.js',
+  'human-memory-policy-check.js',
+  'visitor-protection-check.js',
   'multi-zone-site-check.js',
   'default-zone-removal-check.js',
   'background-save-check.js',
