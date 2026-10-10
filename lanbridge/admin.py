@@ -444,8 +444,9 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
                 "browser_auth": browser_auth.status() if browser_auth else {"phase": "local_only", "message": "浏览器授权请在本机完成"},
                 "token_management": {"authority_saved": bool(service.store.secret("cf_token_authority")), "managed": managed, "managed_read": managed_read, "pending": service.store.get("pending_business_token") or service.store.get("pending_browser_token"), "pending_read": service.store.get("pending_read_token"), "error": service.store.get("token_management_error")},
                 }
-        result["visitor_protection"] = None if limited else service.visitor_risk.snapshot()
+        result["visitor_protection"] = None if limited else service.visitor_risk.snapshot(site_ids=[site["id"] for site in sites_snapshot])
         result["site_publication"] = service.site_publication.status()
+        result["site_pause"] = service.site_pause.status()
         result["domain_onboarding"] = None
         if not remote and not limited:
             job = service.domain_onboarding.status()["job"]
@@ -671,8 +672,8 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         base, host, sni = await asyncio.to_thread(pinned_origin, site, service.settings())
         try:
             async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False) as client:
-                response = await client.get(base + "/", headers={"Host": host}, extensions={"sni_hostname": sni})
-            result = {"http_status": response.status_code, "reachable": True, "checked_at": time.time()}
+                async with client.stream("GET", base + "/", headers={"Host": host}, extensions={"sni_hostname": sni}) as response:
+                    result = {"http_status": response.status_code, "reachable": True, "checked_at": time.time()}
         except httpx.HTTPError:
             result = {"reachable": False, "checked_at": time.time()}
         result["origin"] = site["origin"]
@@ -683,14 +684,23 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
     async def pause_site(site_id: str, request: Request):
         import asyncio
         data = await body(request)
-        return await asyncio.to_thread(service.set_site_paused, site_id, data.get("paused"))
+        limited = request.state.session.get("scope") == "sites"
+        def pause_submission():
+            # Cloud state may change while this request waits for a worker thread.
+            # Check permission and queue the operation under the same service lock.
+            with service.lock:
+                managed = service.site_pause.status().get(site_id, {})
+                if limited and (data.get("cloudflare") or service.site_pause.requires_cloud_access(managed)):
+                    return JSONResponse({"detail": "Cloudflare 云端阻断需要完整管理员权限"}, 403)
+                return service.site_pause.submit(site_id, data.get("paused"), data.get("cloudflare", False))
+        return await asyncio.to_thread(pause_submission)
 
     @app.post("/api/cloudflare/{action}")
     async def cloudflare(action: str, request: Request):
         import asyncio
         data = await body(request)
         if action == "browser-authorize":
-            return browser_auth.start(data.get("browser", "default"))
+            return browser_auth.start(data.get("browser", "default"), require_waf=data.get("require_waf", False))
         if action == "browser-authorize-refresh":
             if remote or request.state.session.get("scope", "admin") != "admin" or request.state.session.get("access_token_id"):
                 raise ValueError("请在本机使用管理员账户重试续期")

@@ -20,7 +20,8 @@ from pathlib import Path
 import httpx
 import anyio
 from fastapi import FastAPI, Request, WebSocket
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.datastructures import Headers
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 import websockets
 
 from .service import pinned_origin
@@ -50,14 +51,28 @@ def verification_response(data, status_code=200, headers=None):
 def gateway_rejection(path, detail, status_code, headers=None):
     if path == PREFIX + "/verify":
         return verification_response({"detail": detail}, status_code, headers)
-    return Response(detail, status_code, headers=headers)
+    return PlainTextResponse(detail, status_code, headers=headers)
+
+
+def paused_response(request, site):
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
+    if request.method not in {"GET", "HEAD"} or "text/html" not in request.headers.get("accept", "") or request.url.path == PREFIX + "/verify":
+        return gateway_rejection(request.url.path, "网站转发已暂停", 503, headers=headers)
+    hostname = html.escape(site["hostname"])
+    headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+    return HTMLResponse(f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>网站暂时不可访问</title>
+<style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:24px;background:#f4f6f5;color:#20382f;font:14px/1.6 'Segoe UI','Microsoft YaHei',system-ui,sans-serif}}main{{width:100%;max-width:480px;padding:32px;border:1px solid #e1e7e3;border-radius:14px;background:#fff}}h1{{margin:0 0 20px;font-size:24px;line-height:1.4;overflow-wrap:anywhere}}h2{{margin:0 0 12px;font-size:18px;font-weight:600}}p{{margin:0;color:#5f7167}}a{{display:inline-flex;align-items:center;justify-content:center;min-height:40px;margin-top:24px;padding:8px 18px;border:1px solid #246b53;border-radius:6px;background:#246b53;color:#fff;font-size:13px;line-height:20px;font-weight:600;text-decoration:none}}a:hover{{background:#1d5945}}a:focus-visible{{outline:2px solid #246b53;outline-offset:3px}}@media(max-width:440px){{body{{padding:16px}}main{{padding:24px}}}}</style></head>
+<body><main aria-labelledby="site-domain"><h1 id="site-domain">{hostname}</h1><h2>网站暂时不可访问</h2><p>管理员已暂停此网站，请稍后再试。</p><a href="">重新尝试</a></main></body></html>""", status_code=503, headers=headers)
 
 
 class TransferLog:
     """Correlate response framing failures without logging cookies or query strings."""
-    def __init__(self, app, logger=None):
+    def __init__(self, app, logger=None, metrics=None):
         self.app = app
         self.logger = logger or logging.getLogger("uvicorn.error")
+        self.metrics = metrics
+        self.pause_log_at = float("-inf")
+        self.pause_log_suppressed = 0
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -70,8 +85,8 @@ class TransferLog:
         async def tracked_send(message):
             if message["type"] == "http.response.start":
                 headers = dict(message["headers"])
-                transfer.update(status=message["status"], length=headers.get(b"content-length", b"").decode(),
-                                encoding=headers.get(b"content-encoding", b"identity").decode())
+                transfer.update(content_type=headers.get(b"content-type", b"").decode("latin1").lower(), status=message["status"], length=headers.get(b"content-length", b"").decode("latin1"),
+                                encoding=headers.get(b"content-encoding", b"identity").decode("latin1"))
                 message = dict(message, headers=[*message["headers"], (b"x-lanbridge-request-id", transfer["id"].encode())])
             await send(message)
             if message["type"] == "http.response.body":
@@ -83,13 +98,32 @@ class TransferLog:
             failure = type(exc).__name__
             raise
         finally:
-            if failure or transfer.get("upstream_error") or transfer["sent"] >= 1024 * 1024 or (transfer["status"] and (transfer["status"] >= 500 or not transfer["complete"])):
+            state = scope.get("state", {})
+            if (self.metrics and state.get("forwarded") and not failure and not transfer.get("upstream_error") and transfer["complete"]
+                    and scope["method"] == "GET" and (200 <= (transfer["status"] or 0) < 300 or transfer["status"] == 304)
+                    and ("text/html" in transfer.get("content_type", "") or "application/xhtml+xml" in transfer.get("content_type", "")
+                         or (transfer["status"] == 304 and b"text/html" in dict(scope.get("headers", [])).get(b"accept", b"")))
+                    and request_kind(Request(scope)) != "asset"):
+                self.metrics.record_page_view(state["site"]["id"], state["ip"])
+            expected_pause = transfer.get("expected_pause") and transfer["status"] == 503 and transfer["complete"] and not failure and not transfer.get("upstream_error") and transfer["sent"] < 1024 * 1024
+            report = True
+            suppressed = 0
+            if expected_pause:
+                now = time.monotonic()
+                if now - self.pause_log_at < 60:
+                    self.pause_log_suppressed += 1
+                    report = False
+                else:
+                    self.pause_log_at = now
+                    suppressed, self.pause_log_suppressed = self.pause_log_suppressed, 0
+            if report and (failure or transfer.get("upstream_error") or transfer["sent"] >= 1024 * 1024 or (transfer["status"] and (transfer["status"] >= 500 or not transfer["complete"]))):
                 self.logger.warning("gateway_transfer %s", json.dumps({
                     "request_id": transfer["id"], "method": scope["method"], "path": scope["path"][:1024],
                     "status": transfer["status"], "content_length": transfer["length"],
                     "content_encoding": transfer["encoding"], "upstream_bytes": transfer["read"],
                     "upstream_length": transfer.get("upstream_length"), "upstream_error": transfer.get("upstream_error"),
                     "downstream_bytes": transfer["sent"], "complete": transfer["complete"], "error": failure,
+                    "expected_pause": bool(expected_pause), "similar_pause_responses_suppressed": suppressed,
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
                     "upstream_headers_ms": transfer.get("upstream_headers_ms")}))
 
@@ -146,6 +180,13 @@ class Limiter:
             bucket[1] += 1
             return True
 
+    def exhausted(self, key, count, window=60):
+        with self.lock:
+            bucket = self.buckets.get(key)
+            if bucket is None:
+                return len(self.buckets) >= 10000
+            return time.monotonic() - bucket[0] < window and bucket[1] >= count
+
     def retry_after(self, key, count, window=60):
         """Read the current window without consuming quota or extending a rejection."""
         with self.lock:
@@ -159,8 +200,9 @@ class Limiter:
 
 class ResourceLimits:
     """Bound active work before reading bodies; hold slots until sending finishes."""
-    def __init__(self, app, http=128, websocket=32, verify=8, per_ip=16, rate=100, burst=200):
+    def __init__(self, app, http=128, websocket=32, verify=8, per_ip=16, rate=100, burst=200, on_reject=None):
         self.app = app
+        self.on_reject = on_reject
         self.limits = {"http": http, "websocket": websocket, "verify": verify}
         self.active = {kind: 0 for kind in self.limits}
         self.peers = {}
@@ -174,6 +216,8 @@ class ResourceLimits:
         self.tokens = min(self.burst, self.tokens + (now - self.updated) * self.rate)
         self.updated = now
         if self.tokens < 1:
+            if self.on_reject:
+                await self.on_reject(scope, receive, send)
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1013})
             else:
@@ -185,6 +229,8 @@ class ResourceLimits:
         key = (kind, ip)
         peer_limit = min(self.per_ip, 2 if kind == "verify" else 4 if kind == "websocket" else self.per_ip)
         if self.active[kind] >= self.limits[kind] or self.peers.get(key, 0) >= peer_limit:
+            if self.on_reject:
+                await self.on_reject(scope, receive, send)
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1013})
             else:
@@ -253,21 +299,49 @@ async def bounded_body(request, maximum=4096, seconds=10):
     return bytes(body)
 
 
-def signed_pass(service, site, ip, browser_id=None):
+def signed_pass(service, site, ip, browser_id=None, *, human_verified=None):
     payload = base64.urlsafe_b64encode(json.dumps({"id": site["id"], "host": site["hostname"], "v": site["policy_version"],
-                                                "ip": ip, "browser_id": browser_id, "issued": time.time(), "exp": time.time() + site["session_minutes"] * 60}).encode()).decode().rstrip("=")
+                                                "ip": ip, "browser_id": browser_id, "human": site["human_check"] if human_verified is None else human_verified, "issued": time.time(), "exp": time.time() + site["session_minutes"] * 60}).encode()).decode().rstrip("=")
     signature = hmac.new(service.store.secret("signing_key").encode(), payload.encode(), hashlib.sha256).hexdigest()
     return payload + "." + signature
 
 
-def valid_pass(service, site, ip, token, *, check_risk=True):
+def verified_claims(service, token, proofs=None):
+    # Cache only signature/JSON work for this request or WebSocket connection.
+    # Binding, expiry and revocation are deliberately rechecked on every use.
+    if not isinstance(token, str) or not token or len(token) > 4096:
+        return None
+    if proofs is not None and token in proofs:
+        return proofs[token]
+    claims = None
     try:
-        payload, signature = token.split(".")
-        expected = hmac.new(service.store.secret("signing_key").encode(), payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
+        payload, signature = token.split('.')
+        expected = hmac.new(service.store.secret('signing_key').encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(signature, expected):
+            decoded = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+            if isinstance(decoded, dict):
+                claims = decoded
+    except (ValueError, TypeError, RecursionError):
+        pass
+    if proofs is not None:
+        proofs[token] = claims
+    return claims
+
+
+def connection_proofs(connection):
+    proofs = getattr(connection.state, 'visitor_claims', None)
+    if proofs is None:
+        proofs = {}
+        connection.state.visitor_claims = proofs
+    return proofs
+
+
+def valid_pass(service, site, ip, token, *, check_risk=True, require_human=False, proofs=None):
+    try:
+        data = verified_claims(service, token, proofs)
+        if data is None:
             return False
-        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        return data["id"] == site["id"] and data["host"] == site["hostname"] and data["v"] == site["policy_version"] and data["ip"] == ip and data["exp"] > time.time() and (not check_risk or not service.visitor_risk.revoked(site["id"], token, data.get("issued", data["exp"] - site["session_minutes"] * 60), ip, browser_id=data.get("browser_id")))
+        return data["id"] == site["id"] and data["host"] == site["hostname"] and data["v"] == site["policy_version"] and data["ip"] == ip and data["exp"] > time.time() and (not require_human or data.get("human", site["human_check"]) is True) and (not check_risk or not service.visitor_risk.revoked(site["id"], token, data.get("issued", data["exp"] - site["session_minutes"] * 60), ip, browser_id=data.get("browser_id")))
     except (ValueError, KeyError, TypeError):
         return False
 
@@ -283,16 +357,14 @@ def signed_human(service, site, user_agent, ip=None, browser_id=None):
     return payload + "." + signature
 
 
-def valid_human(service, site, user_agent, token, *, check_risk=True):
+def valid_human(service, site, user_agent, token, *, check_risk=True, proofs=None):
     days = site.get("human_remember_days", 1)
     if not site["human_check"] or not days or not isinstance(token, str) or len(token) > 4096:
         return False
     try:
-        payload, signature = token.split(".")
-        expected = hmac.new(service.store.secret("signing_key").encode(), payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
+        data = verified_claims(service, token, proofs)
+        if data is None:
             return False
-        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         now = time.time()
         return (data["kind"] == "human" and data["id"] == site["id"] and data["host"] == site["hostname"]
                 and data["v"] == site["policy_version"] and data["ua"] == hashlib.sha256(user_agent.encode()).hexdigest()
@@ -302,10 +374,14 @@ def valid_human(service, site, user_agent, token, *, check_risk=True):
         return False
 
 
-def visitor_access(service, site, ip, cookies, user_agent):
-    if valid_pass(service, site, ip, cookies.get(PASS_COOKIE, '')):
+def visitor_access(service, site, ip, cookies, user_agent, *, human_required=None, proofs=None):
+    if human_required is None:
+        human_required = site["human_check"]
+    if (valid_pass(service, site, ip, cookies.get(PASS_COOKIE, ''), require_human=human_required, proofs=proofs)
+            or (valid_pass(service, site, ip, cookies.get(PASS_COOKIE, ''), proofs=proofs)
+                and valid_human(service, site, user_agent, cookies.get(HUMAN_COOKIE, ''), proofs=proofs))):
         return 'session'
-    if not site['passcode_required'] and valid_human(service, site, user_agent, cookies.get(HUMAN_COOKIE, '')):
+    if not site['passcode_required'] and valid_human(service, site, user_agent, cookies.get(HUMAN_COOKIE, ''), proofs=proofs):
         return 'memory'
     return None
 
@@ -317,12 +393,14 @@ def visitor_verified(service, site, ip, cookies, user_agent):
 def visitor_identity(service, site, ip, connection):
     # Signature/binding/expiry checks still apply to a revoked proof for its cooldown identity.
     agent = connection.headers.get('user-agent', '')
-    for name, check in [(HUMAN_COOKIE, lambda token: valid_human(service, site, agent, token, check_risk=False)),
-                        (PASS_COOKIE, lambda token: valid_pass(service, site, ip, token, check_risk=False))]:
+    proofs = connection_proofs(connection)
+    for name, check in [(HUMAN_COOKIE, lambda token: valid_human(service, site, agent, token, check_risk=False, proofs=proofs)),
+                        (PASS_COOKIE, lambda token: valid_pass(service, site, ip, token, check_risk=False, proofs=proofs))]:
         token = connection.cookies.get(name, '')
         if token and check(token):
-            payload = token.split('.')[0]
-            claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+            claims = proofs[token]
+            if name == PASS_COOKIE and not site['passcode_required'] and claims.get('human', site['human_check']) is not True:
+                continue
             identity = claims.get('browser_id')
             if isinstance(identity, str) and len(identity) == 32 and all(c in '0123456789abcdef' for c in identity):
                 return identity
@@ -343,12 +421,14 @@ def visitor_grants(service, site, ip, connection):
     """Only cryptographically validated grants may be entered in the revocation index."""
     agent = connection.headers.get("user-agent", "")
     grants = []
-    for name, valid in [(PASS_COOKIE, lambda token: valid_pass(service, site, ip, token)),
-                        (HUMAN_COOKIE, lambda token: valid_human(service, site, agent, token))]:
+    proofs = connection_proofs(connection)
+    for name, valid in [(PASS_COOKIE, lambda token: valid_pass(service, site, ip, token, proofs=proofs)),
+                        (HUMAN_COOKIE, lambda token: valid_human(service, site, agent, token, proofs=proofs))]:
         token = connection.cookies.get(name, "")
         if token and valid(token):
-            payload = token.split(".")[0]
-            claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+            claims = proofs[token]
+            if name == PASS_COOKIE and not site["passcode_required"] and claims.get("human", site["human_check"]) is not True:
+                continue
             grants.append((token, claims["exp"]))
     return grants
 
@@ -529,43 +609,97 @@ def create_gateway(service):
     budget = BufferBudget()
     risk = service.visitor_risk
 
+    def human_required(site, ip, connection, *, observe=False):
+        if not site['human_check']:
+            return False
+        if site.get('human_check_mode', 'always') != 'adaptive':
+            return True
+        agent = connection.headers.get('user-agent', '')
+        proofs = connection_proofs(connection)
+        if (valid_human(service, site, agent, connection.cookies.get(HUMAN_COOKIE, ''), proofs=proofs)
+                or valid_pass(service, site, ip, connection.cookies.get(PASS_COOKIE, ''), require_human=True, proofs=proofs)):
+            return False
+        threshold = min(60, max(5, site['requests_per_minute'] // 2))
+        key = (site['id'], site['policy_version'], ip, 'human-trigger')
+        if observe:
+            limiter.allow(key, threshold)
+        return limiter.exhausted(key, threshold)
+
+    def connection_remaining(site, ip, connection, *, verify=False):
+        if site.get('human_check_mode') == 'adaptive' and site['human_check']:
+            proofs = connection_proofs(connection)
+            authenticated = (valid_human(service, site, connection.headers.get('user-agent', ''),
+                                        connection.cookies.get(HUMAN_COOKIE, ''), proofs=proofs)
+                             or valid_pass(service, site, ip, connection.cookies.get(PASS_COOKIE, ''),
+                                           require_human=not site['passcode_required'], proofs=proofs))
+            verify = verify or not authenticated
+        return risk.remaining(site['id'], ip, getattr(connection.state, 'browser_id', None), verify=verify)
+
     async def record_abuse(site, ip, connection, kind, path="", *, network=False):
         grants = visitor_grants(service, site, ip, connection)
         browser_id = None if network else getattr(connection.state, "browser_id", None)
         return await anyio.to_thread.run_sync(lambda: risk.record(site["id"], ip, kind, path=path, grants=grants, browser_id=browser_id))
 
+    def public_connector(request):
+        # Only the trusted loopback connector's public requests can trigger cloud writes.
+        return bool(request.client and request.client.host in ('127.0.0.1', '::1')
+                    and request.headers.get('cf-connecting-ip') and public_scheme(request) in ('https', 'wss'))
+
+    async def observe_paused(request, site, *, limited=False):
+        if not site.get('paused') or not public_connector(request):
+            return
+        reason = service.site_pause.traffic.observe(site, limited=limited,
+                                                   scan=risk.sensitive_path(request.url.path))
+        if reason:
+            accepted = await anyio.to_thread.run_sync(lambda: service.site_pause.auto_block(site['id'], site['policy_version'], reason))
+            if not accepted:
+                service.site_pause.traffic.defer(site)
+
+    async def observe_rejected(scope, receive, send):
+        connection = Request(scope) if scope['type'] == 'http' else WebSocket(scope, receive, send)
+        if not public_connector(connection):
+            return
+        site = find_site(service, connection)
+        if site:
+            await observe_paused(connection, site, limited=True)
+
     async def policy(request):
         site = find_site(service, request)
         if not site:
             return gateway_rejection(request.url.path, "Not found", 404)
-        if site.get("paused"):
-            return gateway_rejection(request.url.path, "网站转发已暂停", 503, headers={"Cache-Control": "no-store"})
-        if public_scheme(request) == "http":
+        if public_scheme(request) == "http" and not site.get("paused"):
             return RedirectResponse(str(request.url.replace(scheme="https", netloc=site["hostname"])), status_code=308)
         ip, country = visitor(request)
         request.state.site, request.state.ip = site, ip
-        if denied_policy(site, ip, country):
+        if not site.get("paused") and denied_policy(site, ip, country):
             return gateway_rejection(request.url.path, "访问策略不允许此次访问", 403)
         request.state.browser_id = visitor_identity(service, site, ip, request)
-        remaining = risk.remaining(site["id"], ip, request.state.browser_id, verify=request.url.path == PREFIX + "/verify")
+        remaining = connection_remaining(site, ip, request, verify=request.url.path == PREFIX + "/verify")
         if remaining:
+            await observe_paused(request, site, limited=True)
             return restricted_response(request.url.path, remaining, browser_page=request.method == "GET" and "text/html" in request.headers.get("accept", ""))
         browser_id = request.state.browser_id
-        kind = request_kind(request)
+        kind = "request" if site.get("paused") else request_kind(request)
         allowance = site['requests_per_minute'] * (4 if kind == 'asset' else 1)
         network_exceeded = not limiter.allow((site['id'], ip, 'network'), site['requests_per_minute'] * 8)
         if network_exceeded or not limiter.allow((site['id'], browser_id or ip, kind), allowance):
+            await observe_paused(request, site, limited=True)
             remaining = await record_abuse(site, ip, request, 'rate', network=network_exceeded)
             if remaining:
                 return restricted_response(request.url.path, remaining, browser_page=request.method == "GET" and "text/html" in request.headers.get("accept", ""))
             return gateway_rejection(request.url.path, "请求过于频繁，请稍后重试", 429, headers={"Retry-After": str(max(1,
                 limiter.retry_after((site['id'], ip, 'network'), site['requests_per_minute'] * 8),
                 limiter.retry_after((site['id'], browser_id or ip, kind), allowance)))})
+        if site.get("paused"):
+            await observe_paused(request, site)
+            request.state.transfer["expected_pause"] = True
+            return paused_response(request, site)
         if request.url.path == PREFIX + "/verify":
             return None
         if request.url.path.startswith(PREFIX):
-            return Response("Not found", 404)
-        protected = site["human_check"] or site["passcode_required"]
+            return PlainTextResponse("Not found", 404)
+        needs_human = human_required(site, ip, request, observe=kind != "asset")
+        protected = needs_human or site["passcode_required"]
         temporary_access = False
         if site.get("target") == "lanbridge":
             if request.url.path in PUBLIC_CLIENT_PATHS and not service.store.get("public_client_enabled", True):
@@ -579,15 +713,15 @@ def create_gateway(service):
             session = service.store.session(request.cookies.get("lb_admin", ""))
             if session and session.get("scope") == "sites":
                 temporary_access = allowed(request.method, request.url.path, session["permissions"]) or request.url.path in {"/admin", "/admin/", "/app.js", "/style.css", "/local-login.js", "/favicon.svg"}
-        access = visitor_access(service, site, ip, request.cookies, request.headers.get("user-agent", "")) if protected and not temporary_access else None
+        access = visitor_access(service, site, ip, request.cookies, request.headers.get("user-agent", ""), human_required=needs_human, proofs=connection_proofs(request)) if (site["human_check"] or site["passcode_required"]) and not temporary_access else None
         if protected and not temporary_access and not access:
             if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
-                return gate_page(service, site, human_verified=valid_human(service, site, request.headers.get("user-agent", ""), request.cookies.get(HUMAN_COOKIE, "")))
+                return gate_page(service, site | {"human_check": needs_human}, human_verified=valid_human(service, site, request.headers.get("user-agent", ""), request.cookies.get(HUMAN_COOKIE, ""), proofs=connection_proofs(request)))
             return JSONResponse({"detail": "需要先在浏览器中完成访问验证", "verification_required": True}, 401, headers={"Cache-Control": "no-store"})
         if "http" not in site.get("protocols", ["http", "websocket"]):
-            return Response("此网站未启用 HTTP 转发", 403, headers={"Cache-Control": "no-store"})
+            return PlainTextResponse("此网站未启用 HTTP 转发", 403, headers={"Cache-Control": "no-store"})
         if access == "memory":
-            risk.count("memory_hits")
+            risk.count("memory_hits", site["id"])
         return None
 
     @app.post(PREFIX + "/verify")
@@ -617,8 +751,10 @@ def create_gateway(service):
             if remaining:
                 return restricted_response(request.url.path, remaining, browser_page=request.method == "GET" and "text/html" in request.headers.get("accept", ""))
             return verification_response({"detail": "口令不正确"}, 403)
-        remembered = valid_human(service, site, request.headers.get("user-agent", ""), request.cookies.get(HUMAN_COOKIE, ""))
-        if site["human_check"] and not remembered:
+        remembered = valid_human(service, site, request.headers.get("user-agent", ""), request.cookies.get(HUMAN_COOKIE, ""), proofs=connection_proofs(request))
+        needs_human = human_required(site, ip, request) or bool(site["human_check"] and body.get("token"))
+        human_verified = remembered
+        if needs_human and not remembered:
             token = body.get("token", "")
             secret = service.store.secret("turnstile_secret")
             if not secret or not isinstance(token, str) or not 1 <= len(token) <= 2048:
@@ -643,35 +779,43 @@ def create_gateway(service):
                     return verification_response({"detail": "人类验证未通过，请重试"}, 403)
             except (httpx.HTTPError, ValueError, RecursionError):
                 return verification_response({"detail": "人类验证服务暂不可用"}, 503)
-        # Serialize issuance with escalation so an in-flight verification cannot bypass revocation.
-        with risk.lock:
-            remaining = risk.remaining(site["id"], ip, request.state.browser_id, verify=request.url.path == PREFIX + "/verify")
+            human_verified = True
+        # Serialize with policy changes and escalation before committing a verification.
+        with service.lock, risk.lock:
+            current = next((s for s in service.sites() if s['id'] == site['id']), None)
+            if (not current or not current['enabled'] or current.get('paused')
+                    or current['policy_version'] != site['policy_version']):
+                return verification_response({'detail': '网站访问策略已变化，请刷新页面后重新验证'}, 409)
+            remaining = connection_remaining(site, ip, request, verify=request.url.path == PREFIX + "/verify")
             if remaining:
                 return restricted_response(request.url.path, remaining, browser_page=request.method == "GET" and "text/html" in request.headers.get("accept", ""))
+            if not human_verified and not site["passcode_required"]:
+                return verification_response({"detail": "当前无需验证，请直接访问网站"}, 400)
             browser_id = request.state.browser_id or secrets.token_hex(16)
             response = verification_response({"verified": True})
-            response.set_cookie(PASS_COOKIE, signed_pass(service, site, ip, browser_id), max_age=site["session_minutes"] * 60, httponly=True, secure=True, samesite="lax", path="/")
-            if site["human_check"] and not remembered and site.get("human_remember_days", 1):
+            response.set_cookie(PASS_COOKIE, signed_pass(service, site, ip, browser_id, human_verified=human_verified), max_age=site["session_minutes"] * 60, httponly=True, secure=True, samesite="lax", path="/")
+            if human_verified and not remembered and site.get("human_remember_days", 1):
                 response.set_cookie(HUMAN_COOKIE, signed_human(service, site, request.headers.get("user-agent", ""), ip, browser_id),
                                     max_age=site.get("human_remember_days", 1) * 86400,
                                     httponly=True, secure=True, samesite="lax", path="/")
-            if site["human_check"] and not remembered:
-                risk.count("verified")
+            if human_verified and not remembered:
+                risk.count("verified", site["id"])
             return response
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
     async def proxy(request: Request, path: str):
         site = request.state.site
         if site.get("target") == "lanbridge":
+            request.state.forwarded = True
             return RemoteAdminResponse(remote_admin, request.state.ip)
         try:
             length = bounded_length(request.headers.get("content-length", "0"), 32 * 1024 * 1024)
         except OverflowError:
-            return Response("请求内容过大", 413)
+            return PlainTextResponse("请求内容过大", 413)
         try:
             base, host, sni = await anyio.to_thread.run_sync(pinned_origin, site, service.settings())
         except ValueError:
-            return Response("源站配置不可用", 502)
+            return PlainTextResponse("源站配置不可用", 502)
         raw_path = request.scope.get("raw_path", request.url.path.encode()).decode("ascii")
         query = request.scope.get("query_string", b"").decode("ascii")
         target = base + raw_path + ("?" + query if query else "")
@@ -687,7 +831,7 @@ def create_gateway(service):
             connection_auth = request.headers.get("authorization", "").strip().lower().startswith(("ntlm ", "negotiate "))
             transport = await pools.borrow((site["id"], base, host, sni), isolated=connection_auth)
         except httpx.PoolTimeout:
-            return Response("源站连接繁忙，请稍后重试", 503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
+            return PlainTextResponse("源站连接繁忙，请稍后重试", 503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
         client = httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(120, connect=10, pool=1), follow_redirects=False, trust_env=False)
         async def limited_body():
             size = 0
@@ -704,16 +848,16 @@ def create_gateway(service):
             request.state.transfer["upstream_headers_ms"] = round((time.monotonic() - started) * 1000, 2)
         except ValueError:
             await client.aclose()
-            return Response("请求内容过大", 413)
+            return PlainTextResponse("请求内容过大", 413)
         except httpx.PoolTimeout:
             await client.aclose()
-            return Response("源站连接繁忙，请稍后重试", 503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
+            return PlainTextResponse("源站连接繁忙，请稍后重试", 503, headers={"Retry-After": "1", "Cache-Control": "no-store"})
         except httpx.HTTPError:
             await client.aclose()
-            return Response("局域网源站暂不可用", 502)
+            return PlainTextResponse("局域网源站暂不可用", 502)
         except TimeoutError:
             await client.aclose()
-            return Response("上传超时", 408)
+            return PlainTextResponse("上传超时", 408)
         except BaseException:
             with anyio.CancelScope(shield=True):
                 await client.aclose()
@@ -725,7 +869,8 @@ def create_gateway(service):
                 await client.aclose()
                 return restricted_response(request.url.path, remaining, browser_page=request.method == "GET" and "text/html" in request.headers.get("accept", ""))
         response_headers = []
-        for k, v in filtered_headers(upstream.headers):
+        # Preserve original field bytes rather than HTTPX's automatic text decoding.
+        for k, v in filtered_headers(Headers(raw=[(k.lower(), v) for k, v in upstream.headers.raw])):
             if k.lower() == "location" and (v.startswith(site["origin"] + "/") or v == site["origin"]):
                 v = "https://" + site["hostname"] + v[len(site["origin"]):]
             if k.lower() == "set-cookie":
@@ -751,10 +896,10 @@ def create_gateway(service):
             if not declared.isdigit():
                 request.state.transfer["upstream_error"] = "InvalidContentLength"
                 await close()
-                return Response("源站响应长度无效", 502, headers={"Cache-Control": "no-store"})
+                return PlainTextResponse("源站响应长度无效", 502, headers={"Cache-Control": "no-store"})
             if not budget.reserve(int(declared)):
                 await close()
-                return Response("响应缓冲容量不足，请稍后重试或缩小下载", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})
+                return PlainTextResponse("响应缓冲容量不足，请稍后重试或缩小下载", 503, headers={"Retry-After": "5", "Cache-Control": "no-store"})
             reserved = int(declared)
             released = False
             def release_buffer():
@@ -807,7 +952,7 @@ def create_gateway(service):
                 request.state.transfer["upstream_error"] = type(exc).__name__
                 spool.close()
                 release_buffer()
-                return Response("源站响应未完整接收，请重试", 502, headers={"Cache-Control": "no-store"})
+                return PlainTextResponse("源站响应未完整接收，请重试", 502, headers={"Cache-Control": "no-store"})
             except BaseException:
                 spool.close()
                 release_buffer()
@@ -825,12 +970,20 @@ def create_gateway(service):
         else:
             response = OwnedStreamingResponse(tracked_body(), close=close, status_code=upstream.status_code)
         response.raw_headers = response_headers
+        request.state.forwarded = True
         return response
 
     @app.websocket("/{path:path}")
     async def websocket_proxy(ws: WebSocket, path: str):
         site = find_site(service, ws)
         ip, country = visitor(ws)
+        if site and site.get('paused'):
+            limited = (bool(risk.remaining(site['id'], ip))
+                       or not limiter.allow((site['id'], ip, 'network'), site['requests_per_minute'] * 8)
+                       or not limiter.allow((site['id'], ip, 'request'), site['requests_per_minute']))
+            await observe_paused(ws, site, limited=limited)
+            await ws.close(code=1008)
+            return
         if not site or site.get("target") == "lanbridge" or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
             await ws.close(code=1008)
             return
@@ -838,7 +991,7 @@ def create_gateway(service):
             await ws.close(code=1008)
             return
         ws.state.browser_id = visitor_identity(service, site, ip, ws)
-        if risk.remaining(site["id"], ip, ws.state.browser_id):
+        if connection_remaining(site, ip, ws):
             await ws.close(code=1008)
             return
         network_exceeded = not limiter.allow((site["id"], ip, "network"), site["requests_per_minute"] * 8)
@@ -846,8 +999,9 @@ def create_gateway(service):
             await record_abuse(site, ip, ws, "rate", network=network_exceeded)
             await ws.close(code=1008)
             return
-        access = visitor_access(service, site, ip, ws.cookies, ws.headers.get("user-agent", ""))
-        if (site["human_check"] or site["passcode_required"]) and not access:
+        needs_human = human_required(site, ip, ws, observe=True)
+        access = visitor_access(service, site, ip, ws.cookies, ws.headers.get("user-agent", ""), human_required=needs_human, proofs=connection_proofs(ws))
+        if (needs_human or site["passcode_required"]) and not access:
             await ws.close(code=1008)
             return
         sock = None
@@ -870,7 +1024,7 @@ def create_gateway(service):
                                           **({"server_hostname": sni} if u.scheme == "https" else {})) as remote:
                 await ws.accept(subprotocol=remote.subprotocol)
                 if access == "memory":
-                    risk.count("memory_hits")
+                    risk.count("memory_hits", site["id"])
                 message_budgets = [TokenBudget(200, 400), TokenBudget(200, 400)]
                 byte_budgets = [TokenBudget(2 * 1024 * 1024, 8 * 1024 * 1024), TokenBudget(2 * 1024 * 1024, 8 * 1024 * 1024)]
                 def allowed_message(value, direction):
@@ -901,10 +1055,12 @@ def create_gateway(service):
                 async def watch_policy():
                     while True:
                         await asyncio.sleep(2)
+                        connection_proofs(ws).clear()
                         current = find_site(service, ws)
-                        if not current or current.get("paused") or current["policy_version"] != site["policy_version"] or risk.remaining(site["id"], ip, ws.state.browser_id):
+                        if not current or current.get("paused") or current["policy_version"] != site["policy_version"] or connection_remaining(site, ip, ws):
                             return
-                        if (current["human_check"] or current["passcode_required"]) and not visitor_verified(service, current, ip, ws.cookies, ws.headers.get("user-agent", "")):
+                        needs_human = human_required(current, ip, ws)
+                        if (needs_human or current["passcode_required"]) and not visitor_access(service, current, ip, ws.cookies, ws.headers.get("user-agent", ""), human_required=needs_human, proofs=connection_proofs(ws)):
                             return
                 tasks = [asyncio.create_task(to_remote()), asyncio.create_task(to_browser()), asyncio.create_task(watch_policy())]
                 try:
@@ -925,6 +1081,6 @@ def create_gateway(service):
             if sock:
                 sock.close()
     app.add_middleware(PolicyMiddleware, check=policy)
-    app.add_middleware(ResourceLimits)
-    app.add_middleware(TransferLog, logger=logger)
+    app.add_middleware(ResourceLimits, on_reject=observe_rejected)
+    app.add_middleware(TransferLog, logger=logger, metrics=risk)
     return app

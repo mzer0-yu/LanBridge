@@ -90,6 +90,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
         if result["error"]:
             print(result["error"] + " 管理台仍可使用。", flush=True)
         service.site_publication.recover()
+        service.site_pause.recover()
         service.runtime_id = secrets.token_hex(16)
         service.launcher_control_token = secrets.token_urlsafe(32)
         info = {"instance": service.runtime_id, "admin_port": cfg["admin_port"], "launcher_control": service.launcher_control_token}
@@ -128,6 +129,7 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
         updates = UpdateController(ROOT, service, reload_source, enabled=hot_reload, preflight=lambda: check_imports(ROOT))
         service.update_controller = updates
         updates.start()
+        service.visitor_risk.start_metrics()
         if resume_connector is None:
             def auto_connect():
                 import time
@@ -161,12 +163,18 @@ def serve(service, open_browser=False, authorize_cloudflare=False, admin_port=No
             if admin is not None:
                 admin.should_exit = True
             auto_connect_thread.join()
+        service.site_pause.stop()
         service.site_publication.stop()
         service.domain_onboarding.stop()
         gateway.stop()
         if hasattr(service, "browser_auth"):
             service.browser_auth.stop()
         service.connector.stop()
+        try:
+            service.visitor_risk.stop_metrics()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('visitor_metrics_final_checkpoint_failed')
         listener.close()
         info_path.unlink(missing_ok=True)
         runtime_log.close()

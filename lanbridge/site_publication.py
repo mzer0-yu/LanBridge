@@ -50,20 +50,30 @@ class SitePublication:
             current = self.status()
             return (site or {}) | {'saved': True, 'publication': {'status': 'failed' if current['phase'] == 'failed' else 'queued'}, 'site_publication': current}
 
+    def _check_running(self):
+        with self.lock:
+            if self.stopping:
+                raise RuntimeError('平台正在停止，后台发布未完成；请重试发布')
+
     def _run(self):
         try:
             with self.service.lock:
+                self._check_running()
                 sites = self.service.sites()
                 if any(site['enabled'] and site['human_check'] for site in sites):
                     self._update(phase='verification', message='配置已保存，正在同步人类验证配置')
                     self.service.cf.create_widget(sites=sites)
+                self._check_running()
                 self._update(phase='publishing', message='配置已保存，正在发布 DNS 和网站路由并核验')
                 desired = sorted(site['hostname'] for site in sites if site['enabled'])
                 published = sorted(self.service.store.get('published_hosts', []))
                 if desired != published or self.service.store.get('publication_error'):
                     preview = self.service.cf.plan()
+                    self._check_running()
                     self.service.cf.apply(preview['revision'])
-                self._update(phase='succeeded', message='配置已保存，后台发布已完成')
+                with self.lock:
+                    self._check_running()
+                    self._update(phase='succeeded', message='配置已保存，后台发布已完成')
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else '后台发布未完成，请检查网络及配置后重试'
             if len(message) > 400 or message.startswith('{'):

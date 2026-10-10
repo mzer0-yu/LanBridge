@@ -21,6 +21,8 @@ from .models import Settings
 VERSION = "1.0.0-beta.12"
 SCOPES = ["account:read", "argotunnel.write", "teams-connector-cloudflared.write", "dns.write", "zone.read", "zone.write", "challenge-widgets.write"]
 
+WAF_SCOPE = "zone-waf.write"
+
 REFRESH_REASONS = {
     "invalid_grant": "Cloudflare 拒绝了刷新凭据，需要重新授权。",
     "invalid_client": "Cloudflare 拒绝了授权客户端，需要重新授权。",
@@ -38,6 +40,7 @@ class BrowserAuth:
     def __init__(self, service):
         self.service = service
         self.browser = "default"
+        self.require_waf = False
         self.thread = None
         self.process = None
         self.gate = threading.Lock()
@@ -56,7 +59,7 @@ class BrowserAuth:
             self.update("error", "旧流程在令牌转授阶段失败。现在直接使用浏览器授权，请重新授权一次完成接入，无需另行提供授权令牌。", next_action="reauthorize")
 
     def update(self, phase, message, **diagnostics):
-        self.service.store.set("browser_auth_job", {"phase": phase, "message": message, "updated_at": time.time(), "browser": self.browser, **diagnostics})
+        self.service.store.set("browser_auth_job", {"phase": phase, "message": message, "updated_at": time.time(), "browser": self.browser, "require_waf": self.require_waf, **diagnostics})
 
     def status(self):
         return self.service.store.get("browser_auth_job", {"phase": "idle", "message": "在 Cloudflare 官方页面授权一次，自动接入并刷新凭据，无需粘贴令牌。"})
@@ -246,7 +249,9 @@ class BrowserAuth:
             value = value["result"]
         return value
 
-    def start(self, browser="default"):
+    def start(self, browser="default", *, require_waf=False):
+        if type(require_waf) is not bool:
+            raise ValueError("WAF 授权选项必须为布尔值")
         if not isinstance(browser, str) or browser not in {item["id"] for item in available_browsers()}:
             raise ValueError("请选择已安装的浏览器")
         with self.gate, self.service.lock:
@@ -256,6 +261,7 @@ class BrowserAuth:
                 raise ValueError("先前令牌创建结果未知，请在 Cloudflare 核对并通过手动配置接入，平台不会重复创建。")
             cfg = self.service.settings()
             self.browser = browser
+            self.require_waf = require_waf
             self.cancelled.clear()
             self.selection_ready.clear()
             self.zone_choices = []
@@ -296,7 +302,7 @@ class BrowserAuth:
             raise ValueError("请选择已安装的浏览器")
         if self.status().get("phase") == "authorizing":
             self.cancel()
-        return self.start(browser)
+        return self.start(browser, require_waf=self.require_waf)
 
     def stop(self):
         self.cancelled.set()
@@ -350,7 +356,7 @@ class BrowserAuth:
             with tempfile.TemporaryDirectory(prefix="session-", dir=auth_root) as name:
                 directory = Path(name)
                 env = self.environment(directory, cfg["account_id"])
-                scopes = SCOPES
+                scopes = SCOPES + ([WAF_SCOPE] if self.require_waf or WAF_SCOPE in (store.get("managed_business_token") or {}).get("scopes", []) else [])
                 self.update("authorizing", "正在打开所选浏览器，请确认 Cloudflare 授权。误关页面可重新打开授权页。")
                 self.run(command, env, directory, ["auth", "create", "lanbridge", "--no-device", *(["--no-browser"] if self.browser != "default" else []), "--scopes", *scopes], timeout=180)
                 self.update("creating", "授权已完成，正在核对权限和域名归属…")
@@ -359,8 +365,10 @@ class BrowserAuth:
                 if not isinstance(granted, list) or any(not isinstance(scope, str) for scope in granted):
                     raise ValueError("无法核对浏览器实际授予的权限范围；请重新发起浏览器授权。")
                 # Retain only our known scope names, never the identity/email or raw CLI output.
-                diagnostics = {"granted_scopes": [scope for scope in SCOPES if scope in granted]}
+                diagnostics = {"granted_scopes": [scope for scope in SCOPES + [WAF_SCOPE] if scope in granted]}
                 needed = {"dns.write", "zone.read", "zone.write", "challenge-widgets.write"}
+                if self.require_waf:
+                    needed.add(WAF_SCOPE)
                 missing = needed.difference(granted)
                 if not any(scope in granted for scope in ("argotunnel.write", "teams-connector-cloudflared.write")):
                     missing.add("Tunnel Write")
@@ -368,6 +376,8 @@ class BrowserAuth:
                     diagnostics["next_action"] = "reauthorize"
                     raise ValueError("浏览器实际未授予所需范围：" + "、".join(sorted(missing)) + "。未创建令牌；请仅核对这些权限后重新授权。")
                 snapshot = self.read_profile(directory)
+                if self.require_waf and WAF_SCOPE not in snapshot["profile"]["scopes"]:
+                    raise ValueError("授权凭据未包含 zone-waf.write，原授权保持不变；请重新补充 WAF 授权。")
                 original = cfg.copy()
                 if not all(re.fullmatch(r"[a-fA-F0-9]{32}", cfg[k]) for k in ("account_id", "zone_id")) or not cfg["zone_name"]:
                     choices = self.discover_zones(snapshot["profile"]["oauth_token"])
@@ -496,7 +506,7 @@ class BrowserAuth:
     def save_profile(self, snapshot, cfg, *, settings=None):
         store = self.service.store
         token = snapshot["profile"]["oauth_token"]
-        owned = {"kind": "oauth", "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "updated_at": time.time(), "credential_digest": digest(token), "scopes": [s for s in SCOPES if s in snapshot["profile"]["scopes"]]}
+        owned = {"kind": "oauth", "account_id": cfg["account_id"], "zone_id": cfg["zone_id"], "updated_at": time.time(), "credential_digest": digest(token), "scopes": [s for s in SCOPES + [WAF_SCOPE] if s in snapshot["profile"]["scopes"]]}
         with store.lock:
             values = {"managed_business_token": owned,
                       "credential_updated_at": store.get("credential_updated_at", {}) | {"cf_write_token": time.time()},

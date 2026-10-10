@@ -1,17 +1,22 @@
 """Bounded visitor abuse signals, cooldowns and persistent grant revocation.
 
-Only escalation writes storage; normal traffic reads small in-memory indexes.
+Abuse escalation persists immediately; aggregate and per-site metrics checkpoint once per minute.
 Raw cookies, IP addresses and paths are never persisted here.
 """
 from collections import OrderedDict
 import hashlib
+import logging
 import math
 import threading
 import time
 from urllib.parse import unquote
+from .traffic_metrics import TrafficMetrics
 
 
 class VisitorRisk:
+    METRIC_NAMES = ('verified', 'memory_hits', 'restricted')
+    WINDOW = 86400
+    BUCKET = 60
     LIMIT = 4096
     HORIZON = 30 * 86400
     RULES = {'rate': (60, 60), 'scan': (60, 8), 'verify': (300, 5), 'flood': (60, 1)}
@@ -20,8 +25,39 @@ class VisitorRisk:
         self.store, self.clock = store, clock or (lambda: time.time())
         self.lock = threading.RLock()
         self.events = OrderedDict()
-        self.started = self.clock()
-        self.metrics = {'verified': 0, 'memory_hits': 0, 'restricted': 0}
+        self.metric_buckets = {}
+        self.site_metric_buckets = {}
+        self.site_metrics_dirty = False
+        self.metrics_dirty = False
+        self.metrics_stopped = threading.Event()
+        self.metrics_thread = None
+        now = int(self.clock() // self.BUCKET)
+        self.metric_minute = now
+        self.traffic = TrafficMetrics(store, self.clock)
+        saved_metrics = store.get('visitor_metrics', [])
+        if not isinstance(saved_metrics, list):
+            saved_metrics = []
+            self.metrics_dirty = True
+        for row in saved_metrics:
+            if (isinstance(row, list) and len(row) == 4
+                    and all(type(value) is int and value >= 0 for value in row)
+                    and now - self.WINDOW // self.BUCKET + 1 <= row[0] <= now):
+                self.metric_buckets[row[0]] = row[1:]
+            else:
+                self.metrics_dirty = True
+        saved_sites = store.get('visitor_site_metrics', [])
+        active_ids = {site['id'] for site in store.get('sites', [])}
+        if not isinstance(saved_sites, list):
+            saved_sites = []
+            self.site_metrics_dirty = True
+        for row in saved_sites:
+            if (isinstance(row, list) and len(row) == 5
+                    and isinstance(row[1], str) and row[1] in active_ids
+                    and all(type(value) is int and value >= 0 for value in [row[0], *row[2:]])
+                    and now - self.WINDOW // self.BUCKET + 1 <= row[0] <= now):
+                self.site_metric_buckets.setdefault(row[0], {})[row[1]] = row[2:]
+            else:
+                self.site_metrics_dirty = True
         state = store.get('visitor_risk', {})
         self.state = {key: dict(state.get(key, {})) for key in ('blocked', 'revoked', 'epochs', 'site_blocked', 'verify_blocked')}
         self._prune(self.clock())
@@ -112,15 +148,96 @@ class VisitorRisk:
                 self.state['revoked'][fingerprint] = min(expires, now + self.HORIZON)
             self.events.pop(key, None)
             self.store.set('visitor_risk', self.state)
-            self.metrics['restricted'] += 1
+            self.count('restricted', site_id)
             self.store.audit('visitor_restricted', {'site_id': site_id, 'reason': kind,
                                                    'seconds': seconds, 'grants': len(grants)})
             return seconds
 
-    def count(self, kind):
-        with self.lock:
-            self.metrics[kind] += 1
+    def _prune_metrics(self, now):
+        minute = int(now // self.BUCKET)
+        if minute == self.metric_minute:
+            return minute
+        self.metric_minute = minute
+        oldest = minute - self.WINDOW // self.BUCKET + 1
+        for buckets, dirty in [(self.metric_buckets, 'metrics_dirty'), (self.site_metric_buckets, 'site_metrics_dirty')]:
+            stale = [key for key in buckets if key < oldest or key > minute]
+            for key in stale:
+                del buckets[key]
+            if stale:
+                setattr(self, dirty, True)
+        return minute
 
-    def snapshot(self):
+    def count(self, kind, site_id=None):
+        index = self.METRIC_NAMES.index(kind)
         with self.lock:
-            return {'since': self.started, **self.metrics}
+            minute = self._prune_metrics(self.clock())
+            self.metric_buckets.setdefault(minute, [0, 0, 0])[index] += 1
+            self.metrics_dirty = True
+            if site_id is not None:
+                self.site_metric_buckets.setdefault(minute, {}).setdefault(site_id, [0, 0, 0])[index] += 1
+                self.site_metrics_dirty = True
+
+    def record_page_view(self, site_id, ip):
+        with self.lock:
+            self.traffic.record(site_id, ip)
+
+    def snapshot(self, site_ids=None):
+        with self.lock:
+            now = self.clock()
+            self._prune_metrics(now)
+            totals = [sum(row[index] for row in self.metric_buckets.values()) for index in range(3)]
+            result = {'since': now - self.WINDOW, 'window_seconds': self.WINDOW,
+                      'bucket_seconds': self.BUCKET, **dict(zip(self.METRIC_NAMES, totals))}
+            if site_ids is not None:
+                per_site = {site_id: [0, 0, 0] for site_id in site_ids}
+                for bucket in self.site_metric_buckets.values():
+                    for site_id, values in bucket.items():
+                        if site_id in per_site:
+                            per_site[site_id] = [a + b for a, b in zip(per_site[site_id], values)]
+                result['sites'] = {site_id: dict(zip(self.METRIC_NAMES, values)) | self.traffic.snapshot(site_id) for site_id, values in per_site.items()}
+                result['unattributed'] = dict(zip(self.METRIC_NAMES, [max(0, total - sum(values[i] for values in per_site.values())) for i, total in enumerate(totals)]))
+            return result
+
+    def flush_metrics(self):
+        with self.lock:
+            self._prune_metrics(self.clock())
+            active_ids = {site['id'] for site in self.store.get('sites', [])}
+            for minute, bucket in list(self.site_metric_buckets.items()):
+                obsolete = set(bucket) - active_ids
+                for site_id in obsolete:
+                    del bucket[site_id]
+                if obsolete:
+                    self.site_metrics_dirty = True
+                if not bucket:
+                    del self.site_metric_buckets[minute]
+            self.traffic.prune(active_ids)
+            values = {}
+            if self.traffic.dirty:
+                values['visitor_traffic_metrics'] = self.traffic.export()
+            if self.metrics_dirty:
+                values['visitor_metrics'] = [[minute, *row] for minute, row in sorted(self.metric_buckets.items())]
+            if self.site_metrics_dirty:
+                values['visitor_site_metrics'] = [[minute, site_id, *row] for minute, bucket in sorted(self.site_metric_buckets.items()) for site_id, row in sorted(bucket.items())]
+            if len(values) >= 2:
+                self.store.set_many(values)
+            elif values:
+                self.store.set(*next(iter(values.items())))
+            self.metrics_dirty = self.site_metrics_dirty = self.traffic.dirty = False
+
+    def start_metrics(self):
+        if self.metrics_thread is not None:
+            return
+        def checkpoint():
+            while not self.metrics_stopped.wait(self.BUCKET):
+                try:
+                    self.flush_metrics()
+                except Exception:
+                    logging.getLogger(__name__).exception('visitor_metrics_checkpoint_failed')
+        self.metrics_thread = threading.Thread(target=checkpoint, name='lanbridge-visitor-metrics', daemon=True)
+        self.metrics_thread.start()
+
+    def stop_metrics(self):
+        self.metrics_stopped.set()
+        if self.metrics_thread is not None:
+            self.metrics_thread.join()
+        self.flush_metrics()

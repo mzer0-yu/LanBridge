@@ -112,7 +112,7 @@ test('permission failure does not spread to website management or history tabs',
 
 test('website publication status distinguishes pending publication, removal and verification',()=>{
   const context={};vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('function publicationStatus('),source.indexOf('function table(')),context);
+  vm.runInContext(source.slice(source.indexOf('function publicationStatus('),source.indexOf('function pauseNotice(')),context);
   const site={hostname:'app.example.com',enabled:true},current={published_hosts:[]};
   assert.equal(context.publicationStatus(site,current).label,'待发布');
   current.published_hosts=[site.hostname];assert.equal(context.publicationStatus(site,current).label,'已发布');
@@ -151,15 +151,15 @@ test('unpublished default human-check option is preparation, not a security fail
   const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.deepEqual(Array.from(marked(context)),['sites']);
 });
 
-test('a replaced credential is awaiting verification instead of a current permission failure',()=>{
+test('historical failures after credential replacement do not mark navigation as needing action',()=>{
   const state=ready();state.cloudflare_permission_issues=[{status:'needs_recheck',detail:'Old 403'}];
-  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].textContent,'权限待核验');assert.equal(nodes['#settings-nav-status'].className,'nav-status neutral');assert.deepEqual(Array.from(marked(context)),[]);
+  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.equal(nodes['#cloudflare-permission-alert'].hidden,true);assert.deepEqual(Array.from(marked(context)),[]);
 });
 
 test('permission and missing tunnel actions remain available in the combined forwarding page',()=>{
   const state=ready();state.settings.tunnel_id='';state.connector.running=false;state.credentials.tunnel_token=false;state.cloudflare_permission_issues=[{status:'last_failure',detail:'Cloudflare API HTTP 403：创建 Tunnel失败'}];
   state.sites=[{id:'s',enabled:true,hostname:'app.example.com',human_check:false}];
-  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].textContent,'权限待核验');
+  const {context,nodes}=harness(state);context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].textContent,'权限待检查');
   state.cloudflare_permission_issues=[];context.renderNavigationIssues();assert.equal(nodes['#settings-nav-status'].hidden,true);assert.equal(nodes['#sites-nav-status'].hidden,false);
   state.settings.tunnel_id='t';state.published_hosts=['app.example.com'];context.renderNavigationIssues();assert.equal(nodes['#sites-nav-status'].hidden,false);
   state.credentials.tunnel_token=true;state.connector.installed=false;context.renderNavigationIssues();assert.equal(nodes['#sites-nav-status'].hidden,false);
@@ -374,7 +374,7 @@ test('shortcuts reveal optional credential sections before focusing their fields
 
 test('site editor shows passcode only when enabled and avoids revalidation warning for public sites',()=>{
   const form={elements:{id:{value:'existing'},human_check:{checked:false},passcode_required:{checked:false}}};
-  const nodes={'#site-form':form,'#site-passcode-field':{},'#policy-save-hint':{}};
+  const nodes={'#site-form':form,'#site-forward-lanbridge':{checked:false},'#site-passcode-field':{},'#site-human-mode-field':{},'#policy-save-hint':{}};
   const context={$:key=>nodes[key]};vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function updateSiteControls('),source.indexOf('function selectedProtocols(')),context);
   context.updateSiteControls();assert.equal(nodes['#site-passcode-field'].hidden,true);assert.equal(nodes['#policy-save-hint'].hidden,true);
@@ -597,4 +597,15 @@ test('configuration actions refresh state once, including inline failures',async
   const block=source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
   assert(block.includes('await action('));assert(!block.includes('await loadState('),start);
  }
+});
+
+for(const changed of [false,true])test(`remote verification response respects login generation changed=${changed}`,async()=>{
+ let finish,reloads=0,auths=0;
+ const context={csrf:'old-session',remoteAccess:true,AbortSignal:{timeout:()=>null},
+  fetch:()=>new Promise(resolve=>finish=resolve),location:{reload(){reloads++}},showAuth(){auths++}};
+ vm.createContext(context);
+ vm.runInContext(source.slice(source.indexOf('async function api('),source.indexOf('function setLoginMethod(')),context);
+ const pending=context.api('state');if(changed)context.csrf='new-session';
+ finish({ok:false,status:401,json:async()=>({verification_required:true,detail:'verification needed'})});
+ await assert.rejects(pending);assert.equal(reloads,changed?0:1);assert.equal(auths,0);
 });

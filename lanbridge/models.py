@@ -17,6 +17,7 @@ class Site(BaseModel):
     paused: bool = False
     protocols: list[Literal["http", "websocket"]] = Field(default_factory=lambda: ["http", "websocket"], min_length=1)
     human_check: bool = True
+    human_check_mode: Literal["always", "adaptive"] = "always"
     passcode_required: bool = False
     allowed_countries: list[str] = Field(default_factory=list)
     allowed_ips: list[str] = Field(default_factory=list)

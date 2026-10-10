@@ -98,3 +98,27 @@ def test_slow_probe_resolution_does_not_block_other_admin_requests(service, monk
             assert response.json()["reachable"]
 
     asyncio.run(check())
+
+
+def test_probe_closes_upstream_without_reading_response_body(service, monkeypatch):
+    site = add_site(service)
+    owner = admin_client(service)
+    original = httpx.AsyncClient
+
+    class UnboundedBody(httpx.AsyncByteStream):
+        read = False
+        closed = False
+        async def __aiter__(self):
+            self.read = True
+            raise AssertionError("a status probe must not download the response body")
+            yield b""
+        async def aclose(self):
+            self.closed = True
+
+    stream = UnboundedBody()
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)), **kw))
+    response = owner.post(f'/api/sites/{site["id"]}/probe', json={})
+    assert response.status_code == 200 and response.json()["reachable"]
+    assert not stream.read and stream.closed
+    assert service.store.get("probe_" + site["id"])["http_status"] == 200

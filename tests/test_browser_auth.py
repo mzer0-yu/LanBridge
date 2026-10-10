@@ -218,7 +218,7 @@ def test_browser_endpoint_requires_auth_and_csrf(browser,monkeypatch):
     from lanbridge.store import password_hash
     browser.service.store.set("admin", {"username":"admin","password_hash":password_hash("correct horse battery")})
     calls=[]
-    monkeypatch.setattr(BrowserAuth,"start",lambda self, browser="default":calls.append(True) or {"phase":"authorizing"})
+    monkeypatch.setattr(BrowserAuth,"start",lambda self, browser="default", **kwargs:calls.append(True) or {"phase":"authorizing"})
     client=TestClient(create_admin(browser.service),base_url="http://127.0.0.1:8890",headers={"Origin":"http://127.0.0.1:8890"})
     assert client.post("/api/cloudflare/browser-authorize",json={}).status_code==401
     login=client.post("/api/login",json={"username":"admin","password":"correct horse battery"})
@@ -708,3 +708,39 @@ def test_automatic_setup_retrieves_missing_token_for_configured_tunnel_without_c
     assert browser.status()['phase']=='done'
     assert calls==[('GET','/accounts/'+'a'*32+'/cfd_tunnel/22222222-2222-4222-8222-222222222222/token')]
     assert browser.service.settings()['tunnel_id']=='22222222-2222-4222-8222-222222222222'
+
+
+def test_waf_consent_requests_and_persists_scope(browser, monkeypatch):
+    from lanbridge.browser_auth import WAF_SCOPE
+    calls = fake_login(browser, monkeypatch, scopes=SCOPES + [WAF_SCOPE])
+    browser.start(require_waf=True)
+    browser.thread.join(timeout=5)
+    assert browser.status()["phase"] == "done"
+    assert WAF_SCOPE in calls[0][0]
+    assert WAF_SCOPE in browser.service.store.get("managed_business_token")["scopes"]
+
+
+def test_waf_consent_missing_scope_keeps_previous_credentials(browser, monkeypatch):
+    calls = fake_login(browser, monkeypatch)
+    browser.start(require_waf=True)
+    browser.thread.join(timeout=5)
+    assert "zone-waf.write" in calls[0][0]
+    assert browser.status()["phase"] == "error"
+    assert "zone-waf.write" in browser.status()["message"]
+    assert browser.service.store.secret("cf_write_token") == "old-business-secret"
+    assert not browser.service.store.secret("cf_oauth_profile")
+
+
+def test_reauthorization_preserves_existing_waf_scope(browser, monkeypatch):
+    from lanbridge.browser_auth import WAF_SCOPE
+    browser.service.store.set("managed_business_token", {"kind":"oauth", "scopes":[WAF_SCOPE]})
+    calls = fake_login(browser, monkeypatch, scopes=SCOPES + [WAF_SCOPE])
+    browser.start()
+    browser.thread.join(timeout=5)
+    assert browser.status()["phase"] == "done"
+    assert WAF_SCOPE in calls[0][0]
+
+
+def test_waf_consent_rejects_non_boolean(browser):
+    with pytest.raises(ValueError, match="布尔"):
+        browser.start(require_waf="true")

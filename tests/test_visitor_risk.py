@@ -18,6 +18,7 @@ class MemoryStore:
     def __init__(self): self.values, self.writes, self.audit_rows = {}, 0, []
     def get(self, key, default=None): return copy.deepcopy(self.values.get(key, default))
     def set(self, key, value): self.values[key] = copy.deepcopy(value); self.writes += 1
+    def set_many(self, values): self.values.update(copy.deepcopy(values)); self.writes += 1
     def audit(self, action, detail): self.audit_rows.append((action, detail))
 
 
@@ -316,7 +317,7 @@ def test_protection_statistics_are_bounded_aggregate_and_do_not_write_normal_sto
     assert store.writes == 0
     trigger(risk)
     snapshot = risk.snapshot()
-    assert snapshot == {'since': 1000.0, 'verified': 1, 'memory_hits': 1, 'restricted': 1}
+    assert snapshot == {'since': 1000.0 - 86400, 'window_seconds': 86400, 'bucket_seconds': 60, 'verified': 1, 'memory_hits': 1, 'restricted': 1}
     assert 'ip' not in snapshot and 'cookies' not in snapshot
 
 
@@ -386,3 +387,171 @@ def test_rate_retry_after_uses_remaining_window(service, monkeypatch, verify):
     response = client.post(path, json={}, headers={"Origin":"https://app.example.com"}) if verify else client.get(path)
     assert response.status_code == 429
     assert response.headers["retry-after"] == "2"
+
+
+def test_metrics_roll_forward_without_midnight_reset_and_expire():
+    risk, store, clock = guard()
+    clock[0] = 86390
+    risk.count('verified')
+    clock[0] = 86410
+    risk.count('memory_hits')
+    assert risk.snapshot()['verified'] == 1
+    clock[0] = 172740
+    assert risk.snapshot()['verified'] == 0
+    assert risk.snapshot()['memory_hits'] == 1
+    clock[0] = 172800
+    assert risk.snapshot()['memory_hits'] == 0
+
+
+def test_metrics_checkpoint_restart_and_idle_expiry():
+    risk, store, clock = guard()
+    for _ in range(100): risk.count('memory_hits')
+    assert store.writes == 0
+    risk.flush_metrics()
+    assert store.writes == 1
+    risk.flush_metrics()
+    assert store.writes == 1
+    reloaded = VisitorRisk(store, clock=lambda: clock[0])
+    assert reloaded.snapshot()['memory_hits'] == 100
+    clock[0] += 86460
+    assert reloaded.snapshot()['memory_hits'] == 0
+    reloaded.flush_metrics()
+    assert store.get('visitor_metrics') == []
+
+
+def test_metrics_failed_checkpoint_can_retry():
+    risk, store, _ = guard()
+    risk.count('verified')
+    original = store.set
+    def fail(*args): raise OSError('simulated storage error')
+    store.set = fail
+    with pytest.raises(OSError): risk.flush_metrics()
+    assert risk.metrics_dirty and risk.snapshot()['verified'] == 1
+    store.set = original
+    risk.flush_metrics()
+    assert VisitorRisk(store, clock=risk.clock).snapshot()['verified'] == 1
+
+
+def test_metrics_concurrent_counts_and_final_checkpoint():
+    risk, store, _ = guard()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: risk.count('memory_hits'), range(1000)))
+    risk.stop_metrics()
+    assert VisitorRisk(store, clock=risk.clock).snapshot()['memory_hits'] == 1000
+
+
+def test_metrics_buckets_bounded_and_bad_rows_ignored():
+    risk, store, clock = guard()
+    for minute in range(1500):
+        clock[0] = minute * 60
+        risk.count('verified')
+    assert len(risk.metric_buckets) == 1440
+    risk.flush_metrics()
+    rows = store.get('visitor_metrics')
+    store.set('visitor_metrics', rows + [[1500, 999, 0, 0], [1499, -1, 0, 0], ['bad'], [True, 0, 0, 0]])
+    assert VisitorRisk(store, clock=risk.clock).snapshot()['verified'] == 1440
+
+
+def test_metrics_background_checkpoint_and_stop(monkeypatch):
+    import threading
+    risk, _, _ = guard()
+    flushed = threading.Event()
+    calls = []
+    monkeypatch.setattr(risk, 'BUCKET', 0.01)
+    monkeypatch.setattr(risk, 'flush_metrics', lambda: (calls.append(1), flushed.set()))
+    risk.start_metrics()
+    thread = risk.metrics_thread
+    risk.start_metrics()
+    try:
+        assert risk.metrics_thread is thread
+        assert flushed.wait(2)
+    finally:
+        risk.stop_metrics()
+    assert not thread.is_alive() and len(calls) >= 2
+
+
+def test_metrics_restart_removes_expired_storage_without_new_visitors():
+    risk, store, clock = guard()
+    risk.count('verified')
+    risk.flush_metrics()
+    clock[0] += 86460
+    restarted = VisitorRisk(store, clock=lambda: clock[0])
+    assert restarted.snapshot()['verified'] == 0
+    restarted.flush_metrics()
+    assert store.get('visitor_metrics') == []
+
+
+@pytest.mark.parametrize('invalid', [None, {}, 'invalid', [[1, -1, 0, 0]]])
+def test_metrics_invalid_saved_data_does_not_prevent_startup(invalid):
+    store = MemoryStore()
+    store.set('visitor_metrics', invalid)
+    risk = VisitorRisk(store, clock=lambda: 1000)
+    assert risk.snapshot()['verified'] == 0
+    risk.flush_metrics()
+    assert store.get('visitor_metrics') == []
+
+
+def test_metrics_minute_change_and_clock_rollback_remain_consistent():
+    risk, store, clock = guard()
+    clock[0] = 1200
+    risk.count('verified')
+    for _ in range(10): risk.count('memory_hits')
+    clock[0] = 1260
+    risk.count('verified')
+    assert risk.snapshot()['verified'] == 2
+    clock[0] = 1200
+    assert risk.snapshot()['verified'] == 1
+    risk.count('memory_hits')
+    risk.flush_metrics()
+    restarted = VisitorRisk(store, clock=lambda: clock[0])
+    assert restarted.snapshot()['verified'] == 1
+    assert restarted.snapshot()['memory_hits'] == 11
+
+
+def test_site_metrics_split_persist_and_expire():
+    risk, store, clock = guard()
+    store.values['sites'] = [{'id':'one'}, {'id':'two'}]
+    risk.count('verified', 'one'); risk.count('memory_hits', 'two'); risk.count('memory_hits', 'two')
+    snapshot = risk.snapshot(['one', 'two', 'zero'])
+    assert {k:snapshot['sites']['one'][k] for k in risk.METRIC_NAMES} == {'verified':1, 'memory_hits':0, 'restricted':0}
+    assert snapshot['sites']['two']['memory_hits'] == 2
+    assert snapshot['sites']['zero']['verified'] == 0
+    assert not any(snapshot['unattributed'].values()) and store.writes == 0
+    risk.flush_metrics(); assert store.writes == 1
+    reloaded = VisitorRisk(store, clock=lambda:clock[0])
+    assert reloaded.snapshot(['one', 'two'])['sites'] == risk.snapshot(['one', 'two'])['sites']
+    clock[0] += 86460
+    assert reloaded.snapshot(['one', 'two'])['sites']['one']['verified'] == 0
+    reloaded.flush_metrics(); assert store.get('visitor_site_metrics') == []
+
+
+def test_site_metrics_keep_legacy_totals_and_cleanup_removed_sites():
+    risk, store, clock = guard(); store.values['sites'] = [{'id':'one'}]
+    risk.count('verified'); risk.count('memory_hits', 'one')
+    assert risk.snapshot(['one'])['unattributed']['verified'] == 1
+    risk.flush_metrics(); store.values['sites'] = []
+    assert risk.snapshot([])['memory_hits'] == 1
+    risk.flush_metrics(); assert store.get('visitor_site_metrics') == []
+    assert VisitorRisk(store, clock=lambda:clock[0]).snapshot([])['unattributed']['memory_hits'] == 1
+
+
+def test_site_metrics_atomic_failure_preserves_pending_counts(service, monkeypatch):
+    site = service.save_site({'name':'metrics','hostname':'app.example.com','origin':'http://127.0.0.1:9300','human_check':False})
+    risk = service.visitor_risk; risk.count('verified', site['id'])
+    original = service.store.set_many
+    def fail(values): raise OSError('test-only failure')
+    monkeypatch.setattr(service.store, 'set_many', fail)
+    with pytest.raises(OSError): risk.flush_metrics()
+    assert risk.metrics_dirty and risk.site_metrics_dirty
+    assert service.store.get('visitor_site_metrics') is None
+    monkeypatch.setattr(service.store, 'set_many', original); risk.flush_metrics()
+    reloaded = VisitorRisk(service.store)
+    assert reloaded.snapshot([site['id']])['sites'][site['id']]['verified'] == 1
+
+
+@pytest.mark.parametrize('saved', [None, {}, [[17,'one',1,2,3]], [['bad','one',1,2,3]], [[16,'unknown',1,2,3]]])
+def test_invalid_site_metrics_do_not_prevent_startup(saved):
+    store = MemoryStore();store.values.update(sites=[{'id':'one'}], visitor_site_metrics=saved)
+    risk = VisitorRisk(store, clock=lambda:1000)
+    assert risk.snapshot(['one'])['sites']['one']['verified'] == 0
+    risk.flush_metrics();assert store.get('visitor_site_metrics') == []

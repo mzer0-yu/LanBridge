@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import socket
@@ -19,6 +20,14 @@ def origin():
                 body = b"\x00\x01\xffbinary"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
+            elif self.path == "/latin-header":
+                body = b"<html>header compatibility</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; note=\"caf\xe9\"")
+            elif self.path == "/utf8-header":
+                body = b"<html>header compatibility</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", (b'text/html; note="\xe4\xb8\xad\xe6\x96\x87"').decode("latin1"))
             elif self.path == "/cookie-attributes":
                 body = b"cookie-check"
                 self.send_response(200)
@@ -168,3 +177,22 @@ def test_duplicate_connection_headers_filter_all_nominated_hop_headers():
     assert not any(key.lower() in {"connection","x-first","x-second"} for key, _ in remaining)
     assert ("x-end-to-end", "keep") in remaining
     assert [value for key,value in remaining if key.lower()=="set-cookie"] == ["a=1","b=2"]
+
+
+@pytest.mark.parametrize("path,value", [("/latin-header", b'text/html; note="caf\xe9"'),
+                                        ("/utf8-header", b'text/html; note="\xe4\xb8\xad\xe6\x96\x87"')])
+def test_response_header_bytes_do_not_break_transfer(service, origin, path, value):
+    site = service.save_site({"name": "legacy origin", "hostname": "app.example.com",
+                       "origin": f"http://127.0.0.1:{origin}", "human_check": False})
+    async def check():
+        app = create_gateway(service)
+        # TestClient converts header bytes to strings, which breaks non-ASCII fields.
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="https://app.example.com") as client:
+                response = await client.get(path)
+                assert response.status_code == 200
+                assert response.content == b"<html>header compatibility</html>"
+                assert (b"content-type", value) in response.headers.raw
+                assert service.visitor_risk.snapshot([site["id"]])["sites"][site["id"]]["page_views"] == 1
+    asyncio.run(check())

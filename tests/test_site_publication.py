@@ -91,3 +91,25 @@ def test_thread_start_failure_reports_saved_configuration_and_can_stop(service,m
     assert service.site_publication.status()['phase']=='failed'
     assert len(service.sites())==1
     service.site_publication.stop()
+
+
+@pytest.mark.parametrize("stage", ["widget", "plan"])
+def test_stopping_during_verification_does_not_start_publication(service, monkeypatch, stage):
+    calls = []
+    def widget(**kwargs):
+        calls.append("widget")
+        if stage == "widget":
+            service.site_publication.stopping = True
+    def plan():
+        calls.append("plan")
+        service.site_publication.stopping = True
+        return {"revision": "test"}
+    monkeypatch.setattr(service.cf, "create_widget", widget)
+    monkeypatch.setattr(service.cf, "plan", plan)
+    monkeypatch.setattr(service.cf, "apply", lambda revision: calls.append("apply"))
+    data = body(); data.pop("background")
+    service.site_publication.submit(data)
+    job = wait(service)
+    assert calls == (["widget"] if stage == "widget" else ["widget", "plan"])
+    assert job["phase"] == "failed" and job["saved"]
+    assert service.sites()[0]["hostname"] == 'app.example.com'

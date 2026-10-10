@@ -71,7 +71,7 @@ class Cloudflare:
     def __init__(self, service):
         self.service = service
 
-    def request(self, method, path, body=None, *, force_write=False):
+    def request(self, method, path, body=None, *, force_write=False, allow_missing=False):
         if "/challenges/widgets" in path:
             kind = (self.service.store.get("managed_business_token") or {}).get("kind")
             if kind == "account":
@@ -97,6 +97,8 @@ class Cloudflare:
             with httpx.Client(timeout=20, follow_redirects=False, trust_env=False) as client:
                 response = client.request(method, "https://api.cloudflare.com/client/v4" + path,
                                           headers={"Authorization": "Bearer " + token}, json=body)
+            if response.status_code == 404 and allow_missing:
+                return None
             if response.status_code >= 400:
                 detail = self.failure_hint(method, path, response, "oauth" if (self.service.store.get("managed_business_token") or {}).get("kind") == "oauth" else credential)
                 if response.status_code in (401, 403):
@@ -135,6 +137,8 @@ class Cloudflare:
             permission = "账户 → Cloudflare Tunnel → 编辑（API 权限名 Cloudflare Tunnel Write）；账户资源需包含配置的 Account ID"
         elif "/challenges/widgets" in path:
             operation, permission = "访问 Turnstile", "账户 → Turnstile → 编辑，账户资源需包含配置的 Account ID"
+        elif "/rulesets" in path:
+            operation, permission = "设置网站云端阻断", "区域 → Zone WAF → 编辑，资源范围需包含此网站所属域名"
         elif "/dns_records" in path:
             operation, permission = "访问 DNS", "区域 → DNS → 编辑，区域资源需包含配置的 Zone"
         elif method == "POST" and path == "/zones":
@@ -144,6 +148,8 @@ class Cloudflare:
         name = "浏览器 OAuth 授权" if credential == "oauth" else "只读 API Token" if credential == "cf_read_token" else "写入 API Token"
         prefix = f"Cloudflare API HTTP {response.status_code}：{operation}失败（使用{name}"
         prefix += ("，错误码 " + ",".join(codes[:3]) if codes else "") + "）。"
+        if "/rulesets" in path and response.status_code in (401, 403):
+            return prefix + "需要此域名的 Zone WAF 编辑权限；请在暂停设置中补充 WAF 浏览器授权并授予 zone-waf.write；若账户角色无法授予，可改用具备此权限的 API Token。本机暂停仍保留。"
         if credential == "oauth" and response.status_code in (401, 403):
             if response.status_code == 403 and method == 'POST' and path == '/zones':
                 return prefix + '创建新域名需要目标账户的域名创建权限。若使用未包含 Zone 编辑（zone.write）的旧版浏览器授权，请在“修改接入方式”重新浏览器授权以申请新增权限。续期不会扩大权限；若仍失败，请核对账户角色与资源范围。'
@@ -548,6 +554,8 @@ class Service:
         self.domain_onboarding = DomainOnboarding(self)
         from .site_publication import SitePublication
         self.site_publication = SitePublication(self)
+        from .site_pause import SitePause
+        self.site_pause = SitePause(self)
 
     def set_public_client_enabled(self, enabled):
         if not isinstance(enabled, bool):
@@ -697,7 +705,7 @@ class Service:
 
     def sites(self, cfg=None):
         cfg = self.settings() if cfg is None else cfg
-        return [dict(site, protocols=site.get("protocols", ["http", "websocket"]),
+        return [dict(site, human_check_mode=site.get("human_check_mode", "always"), protocols=site.get("protocols", ["http", "websocket"]),
                      zone_id=site.get("zone_id") or (cfg["zone_id"] if hostname_in_zone(site["hostname"], cfg["zone_name"]) else ""))
                 for site in self.store.get("sites", [])]
 
@@ -826,6 +834,7 @@ class Service:
             hostname_changed = existing and isinstance(body.get("hostname"), str) and body["hostname"].strip().lower().rstrip(".") != existing["hostname"]
             body.setdefault("zone_id", "" if hostname_changed else (existing or {}).get("zone_id", ""))
             body.setdefault("human_remember_days", (existing or {}).get("human_remember_days", 1))
+            body.setdefault("human_check_mode", (existing or {}).get("human_check_mode", "always"))
             if body["target"] == "lanbridge":
                 body["origin"] = f'http://127.0.0.1:{self.settings()["admin_port"]}'
                 body["protocols"] = ["http"]
@@ -839,6 +848,8 @@ class Service:
             old = next((s for s in current if s["id"] == site["id"]), None)
             if site["id"] and not old:
                 raise ValueError("网站 ID 不存在")
+            if old:
+                self.site_pause.guard_edit(old["id"])
             if old and "paused" not in body:
                 site["paused"] = old.get("paused", False)
             if old and "protocols" not in body:
@@ -867,7 +878,12 @@ class Service:
             old_policy = Site(**old).model_dump() if old else {}
             unchanged = old and not passcode and all(site[key] == old_policy[key] for key in policy_keys)
             site["policy_version"] = old["policy_version"] if unchanged and old.get("policy_version") else secrets.token_hex(8)
-            self.store.set_many({"sites": proposed}, secret_values={"passcode_" + site["id"]: hashed} if passcode else None)
+            values = {"sites": proposed}
+            if old and old.get("paused", False) != site["paused"]:
+                attempts = self.store.get("paused_auto_attempts", {})
+                attempts.pop(site["id"], None)
+                values["paused_auto_attempts"] = attempts
+            self.store.set_many(values, secret_values={"passcode_" + site["id"]: hashed} if passcode else None)
             self.store.audit("site_saved", {"id": site["id"], "hostname": site["hostname"], "enabled": site["enabled"]})
             if auto_publish:
                 desired = sorted(s["hostname"] for s in proposed if s["enabled"])
@@ -885,10 +901,14 @@ class Service:
                 return site | {"publication": {"status": "unchanged"}}
             return site
 
-    def set_site_paused(self, site_id, paused):
+    def set_site_paused(self, site_id, paused, *, cloud_internal=False, cloud_status=None):
         if not isinstance(paused, bool):
             raise ValueError("暂停状态必须为布尔值")
+        if cloud_status is not None and not cloud_internal:
+            raise ValueError("云端完成状态仅支持内部提交")
         with self.lock:
+            if not cloud_internal:
+                self.site_pause.guard_edit(site_id)
             sites = self.sites()
             old = next((site for site in sites if site["id"] == site_id), None)
             if not old:
@@ -896,8 +916,16 @@ class Service:
             if not old["enabled"]:
                 raise ValueError("网站已停用，请先编辑并启用网站")
             if old.get("paused", False) == paused:
+                if cloud_status is not None:
+                    self.store.set("site_pause", cloud_status)
                 return old
             site = old | {"paused": paused, "policy_version": secrets.token_hex(8)}
-            self.store.set("sites", [site if row["id"] == site_id else row for row in sites])
+            attempts = self.store.get("paused_auto_attempts", {})
+            attempts.pop(site_id, None)
+            values = {"sites": [site if row["id"] == site_id else row for row in sites],
+                      "paused_auto_attempts": attempts}
+            if cloud_status is not None:
+                values["site_pause"] = cloud_status
+            self.store.set_many(values)
             self.store.audit("site_paused" if paused else "site_resumed", {"id": site_id, "hostname": site["hostname"]})
             return site
