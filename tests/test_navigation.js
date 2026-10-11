@@ -373,8 +373,8 @@ test('shortcuts reveal optional credential sections before focusing their fields
 });
 
 test('site editor shows passcode only when enabled and avoids revalidation warning for public sites',()=>{
-  const form={elements:{id:{value:'existing'},human_check:{checked:false},passcode_required:{checked:false}}};
-  const nodes={'#site-form':form,'#site-forward-lanbridge':{checked:false},'#site-passcode-field':{},'#site-human-mode-field':{},'#policy-save-hint':{}};
+  const form={dataset:{},elements:{origin:{value:'http://127.0.0.1:8080'},id:{value:'existing'},human_check:{checked:false},passcode_required:{checked:false}}};
+  const nodes={'#site-form':form,'#site-forward-lanbridge':{checked:false},'#site-origin-hint':{},'#site-passcode-field':{},'#site-human-mode-field':{},'#policy-save-hint':{}};
   const context={$:key=>nodes[key]};vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function updateSiteControls('),source.indexOf('function selectedProtocols(')),context);
   context.updateSiteControls();assert.equal(nodes['#site-passcode-field'].hidden,true);assert.equal(nodes['#policy-save-hint'].hidden,true);

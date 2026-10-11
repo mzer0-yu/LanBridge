@@ -30,14 +30,14 @@ class SitePublication:
             job.update(values, updated_at=time.time())
             self.service.store.set('site_publication_job', job)
 
-    def submit(self, body=None):
+    def submit(self, body=None, *, allow_static_target=True):
         with self.lock:
             if self.stopping:
                 raise ValueError('平台正在停止，请稍后重试')
             if self.thread and self.thread.is_alive():
                 raise ValueError('网站正在后台发布，请等待完成，勿重复提交')
             # No Cloudflare calls here. Credentials and passcodes never enter the job record.
-            site = self.service.save_site(body) if body is not None else None
+            site = self.service.save_site(body, allow_static_target=allow_static_target) if body is not None else None
             job = {'id': secrets.token_hex(12), 'phase': 'queued', 'saved': True,
                    'site_id': site['id'] if site else '', 'created_at': time.time(),
                    'updated_at': time.time(), 'message': '配置已保存，正在等待后台发布'}

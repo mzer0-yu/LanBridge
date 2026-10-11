@@ -6,7 +6,7 @@ function harness(fetch){
   const nodes={};
   const node=id=>nodes[id]||={disabled:false,hidden:true,textContent:'',children:[],replaceChildren(){this.children=[];},append(child){this.children.push(child);}};
   const controllers=[];let tick;
-  const context={document:{getElementById:node,createElement:()=>({})},fetch,Date,
+  const context={document:{getElementById:node,createElement:()=>({}),createDocumentFragment:()=>({children:[],append(child){this.children.push(child);}})},fetch,Date,
     AbortSignal:{timeout(ms){const controller=new AbortController();controllers.push({ms,controller});return controller.signal;}},
     setInterval(callback){tick=callback;}};
   vm.createContext(context);vm.runInContext(source,context);

@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 from .gateway import Limiter, OwnedStreamingResponse, disabled_client_response
 from .models import Settings
 from .service import pinned_origin
+from .static_site import is_static_origin, validate_homepage
 from .store import password_check, password_hash
 from pydantic import ValidationError
 
@@ -101,7 +102,7 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
             # Exceptions never include raw Cloudflare response or secret payloads.
             detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else "本机服务操作失败，请检查路径、权限或网络"
             if isinstance(exc, ValidationError):
-                labels = {"account_id": "Account ID", "zone_id": "Zone ID", "zone_name": "Zone 名称", "hostname": "公网域名", "origin": "局域网地址", "name": "网站名称", "allowed_ips": "IP 范围", "allowed_countries": "国家范围", "session_minutes": "会话时长", "requests_per_minute": "请求速率"}
+                labels = {"account_id": "Account ID", "zone_id": "Zone ID", "zone_name": "Zone 名称", "hostname": "公网域名", "origin": "转发目标", "name": "网站名称", "allowed_ips": "IP 范围", "allowed_countries": "国家范围", "session_minutes": "会话时长", "requests_per_minute": "请求速率"}
                 fields = [labels.get(str(error["loc"][0]), str(error["loc"][0])) for error in exc.errors() if error.get("loc")]
                 detail = "请检查以下字段的格式或范围：" + "、".join(dict.fromkeys(fields))
             if detail.startswith("{") or len(detail) > 400:
@@ -165,8 +166,8 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
             with service.store.lock:
                 publication = [service.store.get("last_publication_action")]
             review = bool(publication and publication[0] == "publish_incomplete")
-            routes = [{"name": site["name"], "hostname": site["hostname"], "origin": site["origin"],
-                       "published": site["hostname"] in published,
+            routes = [{"name": site["name"], "hostname": site["hostname"], "origin": "本机静态网页" if is_static_origin(site["origin"]) else site["origin"],
+                       **({"static": True} if is_static_origin(site["origin"]) else {}), "published": site["hostname"] in published,
                        "status": "已暂停" if site.get("paused") else "未发布" if site["hostname"] not in published else "待核验" if review else "已发布"}
                       for site in service.sites() if site["enabled"]]
             return {"routes": routes, "updated_at": time.time()}
@@ -654,19 +655,29 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         retry = data.pop('retry_publication', False)
         if type(background) is not bool or type(retry) is not bool:
             raise ValueError('后台保存选项格式无效')
+        allow_static_target = not remote and request.state.session.get('scope') != 'sites'
         if background:
             if retry and data:
                 raise ValueError('重试发布不能同时修改网站配置')
-            return await asyncio.to_thread(service.site_publication.submit, None if retry else data)
+            return await asyncio.to_thread(service.site_publication.submit, None if retry else data, allow_static_target=allow_static_target)
         if retry:
             raise ValueError('重试发布需要后台模式')
-        return await asyncio.to_thread(service.save_site, data, synchronize_verification=True, auto_publish=True)
+        return await asyncio.to_thread(service.save_site, data, synchronize_verification=True, auto_publish=True, allow_static_target=allow_static_target)
 
     @app.post("/api/sites/{site_id}/probe")
     async def probe(site_id: str):
         site = next((s for s in service.sites() if s["id"] == site_id), None)
         if not site:
             raise ValueError("网站不存在")
+        if is_static_origin(site["origin"]):
+            try:
+                await asyncio.to_thread(validate_homepage, site["origin"], (service.store.root,))
+                result = {"http_status": 200, "reachable": True, "checked_at": time.time()}
+            except ValueError:
+                result = {"reachable": False, "checked_at": time.time()}
+            result["origin"] = site["origin"]
+            service.store.set("probe_" + site_id, result)
+            return result
         if site.get("target") == "lanbridge":
             return {"http_status": 200, "reachable": True, "checked_at": time.time(), "origin": site["origin"]}
         base, host, sni = await asyncio.to_thread(pinned_origin, site, service.settings())

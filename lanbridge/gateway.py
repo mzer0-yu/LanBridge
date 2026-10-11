@@ -25,6 +25,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainT
 import websockets
 
 from .service import pinned_origin
+from .static_site import is_static_origin, static_response
 from .store import password_check
 from .upstream import UpstreamPools
 from .gateway_log import transfer_logger
@@ -808,6 +809,9 @@ def create_gateway(service):
         if site.get("target") == "lanbridge":
             request.state.forwarded = True
             return RemoteAdminResponse(remote_admin, request.state.ip)
+        if is_static_origin(site["origin"]):
+            request.state.forwarded = True
+            return await static_response(request, site["origin"], (service.store.root,))
         try:
             length = bounded_length(request.headers.get("content-length", "0"), 32 * 1024 * 1024)
         except OverflowError:
@@ -984,7 +988,7 @@ def create_gateway(service):
             await observe_paused(ws, site, limited=limited)
             await ws.close(code=1008)
             return
-        if not site or site.get("target") == "lanbridge" or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
+        if not site or site.get("target") == "lanbridge" or is_static_origin(site["origin"]) or site.get("paused") or "websocket" not in site.get("protocols", ["http", "websocket"]) or denied_policy(site, ip, country) or ws.url.path.startswith(PREFIX):
             await ws.close(code=1008)
             return
         if ws.headers.get("origin") and ws.headers["origin"] != "https://" + site["hostname"]:

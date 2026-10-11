@@ -4,6 +4,7 @@ import re
 from urllib.parse import urlsplit
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
+from .static_site import homepage_path, is_static_origin
 
 
 class Site(BaseModel):
@@ -45,6 +46,8 @@ class Site(BaseModel):
     @field_validator("origin")
     @classmethod
     def source(cls, v):
+        if is_static_origin(v):
+            return homepage_path(v).as_uri()
         u = urlsplit(v.strip())
         if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password or u.query or u.fragment or u.path not in ("", "/"):
             raise ValueError("源站仅支持 http(s)://主机:端口；不含路径、账号或查询参数")
@@ -55,6 +58,14 @@ class Site(BaseModel):
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("端口无效")
         return v.strip().rstrip("/")
+
+    @model_validator(mode="after")
+    def static_protocols(self):
+        if is_static_origin(self.origin):
+            if self.target != "website":
+                raise ValueError("静态主页不能作为 LanBridge 管理入口")
+            self.protocols = ["http"]
+        return self
 
     @field_validator("allowed_countries")
     @classmethod

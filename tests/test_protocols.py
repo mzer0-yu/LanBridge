@@ -51,3 +51,17 @@ def test_websocket_only_retains_verification_without_http_forwarding(service, or
                        data={'passcode': 'incorrect'}).status_code != 403
     client.cookies.set(PASS_COOKIE, signed_pass(service, site, 'testclient'))
     assert client.get('/').status_code == 403
+
+
+@pytest.mark.parametrize("old_protocols", [["websocket"], ["http", "websocket"]])
+def test_switch_to_lanbridge_without_protocols_keeps_management_http(service, old_protocols):
+    admin_client(service)
+    site = service.save_site({'name': 'Switch target', 'hostname': 'app.example.com',
+                              'origin': 'http://127.0.0.1:9300', 'human_check': False,
+                              'protocols': old_protocols})
+    edit = site | {'target': 'lanbridge'}
+    edit.pop('protocols')
+    updated = service.save_site(edit)
+    assert updated['protocols'] == ['http']
+    with TestClient(create_gateway(service), base_url='https://app.example.com') as client:
+        assert client.get('/client').status_code == 200

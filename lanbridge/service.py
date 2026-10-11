@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from .models import Settings, Site, Zone
+from .static_site import is_static_origin, validate_homepage
 from .store import Store, password_hash
 
 LAN_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
@@ -54,6 +55,8 @@ def hostname_in_zone(hostname, zone_name):
 
 
 def pinned_origin(site, settings):
+    if is_static_origin(site["origin"]):
+        return site["origin"], "", ""
     u = urlsplit(site["origin"])
     port = u.port or (443 if u.scheme == "https" else 80)
     if site.get("target") == "lanbridge":
@@ -817,11 +820,13 @@ class Service:
     def validate_site(self, site):
         cfg = self.settings()
         self.site_zone(site)
+        if is_static_origin(site["origin"]):
+            validate_homepage(site["origin"], (self.store.root,))
         pinned_origin(site, cfg)
         if site["passcode_required"] and not self.store.secret("passcode_" + site["id"]):
             raise ValueError("请设置至少 12 位的网站访问口令")
 
-    def save_site(self, body, *, synchronize_verification=False, auto_publish=False):
+    def save_site(self, body, *, synchronize_verification=False, auto_publish=False, allow_static_target=True):
         with self.lock:
             # Editing existing policies must remain possible even if credentials are unavailable.
             if not body.get("id"):
@@ -848,11 +853,17 @@ class Service:
             old = next((s for s in current if s["id"] == site["id"]), None)
             if site["id"] and not old:
                 raise ValueError("网站 ID 不存在")
+            if is_static_origin(site["origin"]):
+                if not allow_static_target and (not old or site["origin"] != old["origin"]):
+                    raise ValueError("静态托管目录只能由本机完整管理员设置")
+                # A missing homepage must not prevent disabling an existing mapping.
+                if not old or site["origin"] != old["origin"] or site["enabled"]:
+                    validate_homepage(site["origin"], (self.store.root,))
             if old:
                 self.site_pause.guard_edit(old["id"])
             if old and "paused" not in body:
                 site["paused"] = old.get("paused", False)
-            if old and "protocols" not in body:
+            if old and "protocols" not in body and not is_static_origin(site["origin"]):
                 site["protocols"] = old.get("protocols", ["http", "websocket"])
             site["id"] = site["id"] or secrets.token_hex(8)
             if any(s["hostname"] == site["hostname"] and s["id"] != site["id"] for s in current):

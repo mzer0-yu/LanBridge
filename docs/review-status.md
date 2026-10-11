@@ -4,6 +4,8 @@
 
 ## 当前结论
 
+新增本机静态目录托管：转发目标可填写主页 `file:///` URL，主页所在目录提供静态资源，沿用访问防护、暂停和滚动统计。目录配置限本机完整管理员，公网列表隐藏本地路径，文件边界拒绝越界、私有目录、隐藏文件及链接。无需新增目标选择控件；静态目标自动使用 HTTP，API 未传协议时也不会继承旧 WebSocket。已有静态主页缺失时仍可停用或修改停用名称；新增目录和重新启用继续检查文件。
+
 账户授权、隧道自动配置、阿里云域名接入和网站后台发布沿用现有权限及数据保护边界。域名迁移必须预览并明确确认 DNS 切换；已接入列表只显示当前阿里云账户持有且已接入 LanBridge 的域名。有效网站关联会阻止移除域名。
 
 Cloudflare 浏览器授权保存后自动配置专用隧道，部分失败可继续；未知创建结果先核对原任务，重启后可恢复，账户或凭据变化会拒绝旧任务。隧道连接作为维护入口，已配置时无需操作。授权成功提示仅属于当前页面操作，历史失败保留详情与时间。
@@ -20,11 +22,11 @@ Cloudflare 浏览器授权保存后自动配置专用隧道，部分失败可继
 
 ## 最新验证
 
-2026-10-11 复查完成：完整后端 608 项、100 项 Node、35 组隔离浏览器检查通过，差异格式及 Python 语法通过。源站响应头不再因自动字符解码/重编码或日志 UTF-8 解码而打断转发；两种非 ASCII 头字节验证状态、正文、原始字段值及页面计数。保持逐跳头、Cookie 和重定向保护，不转换网页正文。保留既有测试客户端弃用提示。
+2026-10-11 全面复查完成：完整后端 634 项通过、1 项 Windows 链接创建权限相关用例跳过，保留 1 项测试客户端弃用提示；100 项 Node、37 组隔离浏览器检查、两组启动器检查及 pip check 通过。完整后端开始后新增的静态限流用例在专项中验证，专项 30 项通过、1 项跳过。差异格式检查通过。此前 client 空 JSON/无效 JSON 的中文提示及刷新恢复仍通过；本轮静态路径检查减少重复元数据读取，未新增已复现漏洞或视觉缺陷。具体范围见本轮覆盖清单。
 
 输入框占位文字沿用较深次级文字色，字体/布局不变，共同静态版本 97 已由运行服务提供。可见文字对比度检查扩展至六页及添加网站弹窗的桌面/手机 14 个场景，包含空输入框 ::placeholder 的颜色与透明度；已查看弹窗桌面和手机截图。禁用、祖先透明度、渐变/图片背景不纳入自动合规断言，不声称全站无障碍认证。折叠、复选框、暂停、验证、长文本、权限与统计沿用完整 UI 回归。
 
-最近完整检查的 pip check 通过，2026-10-11 OSV 查询 27 个锁定包未返回已知漏洞记录；本轮未改依赖，未重复查询。两个个人 skill 已补充占位伪元素和代理响应头检查要点，格式验证通过。源码保持 dev；本轮改动已完成本地验证，按用户授权提交并同步 GitHub。此前验证与测量见 [检查历史](history.md) 与 [性能测量](performance-and-release.md)。
+最近完整检查的 pip check 通过，2026-10-11 OSV 查询 27 个锁定包未返回已知漏洞记录；本轮未改依赖，未重复查询。两个个人 skill 已补充占位伪元素和代理响应头检查要点，格式验证通过。源码保持 dev；本次用户已明确授权，将静态托管、界面修复和检查记录提交并同步 GitHub dev；此前推送基线为 bf0b9d9，最终同步结果以 Git 记录为准。此前验证与测量见 [检查历史](history.md) 与 [性能测量](performance-and-release.md)。
 
 ## 清理与证据
 
@@ -32,8 +34,24 @@ Cloudflare 浏览器授权保存后自动配置专用隧道，部分失败可继
 
 37 个过时测试目录（12367 个文件，约 262 MiB）已归档到项目外既有 `C:/Users/yu/Documents/Codex/2026-10-04/wo/trash/lanbridge-comprehensive-review-20261010/`，保留来源清单和旧状态文档备份，由用户手动删除。正式 `data/`、`bin/`、`.venv/`、有效源码和测试未清理。
 
-最新截图在 `.test-artifacts/ui/`，最新完整后端数据在 `.test-artifacts/python-response-review/`，本轮回归日志在 `.test-artifacts/response-review-python.log`、`.test-artifacts/response-review-node.log` 和 `.test-artifacts/response-review-ui.log`；此前完整回归 `.test-artifacts/python-fixed-review/` 及对应 fixed-review 日志继续保留，统计路径隔离测量在 `.test-artifacts/protection-efficiency-benchmark.json`，此前恢复专项数据在 `.test-artifacts/python-recovery-stop-final/` 与 `.test-artifacts/recovery-stop-confirmed/`，性能证据在 `.test-artifacts/performance-20261010-review/report.json`，依赖查询证据在 `.test-artifacts/dependencies.json`。此前归档信息及历史验证均集中于 [检查历史](history.md)。
+最新截图在 `.test-artifacts/ui/`，最新完整后端数据在 `.test-artifacts/python-exhaustive-review/`，日志为 `.test-artifacts/exhaustive-review-python.log`；最新 Node 日志为 `.test-artifacts/exhaustive-review-node.log`，完整 UI 日志为 `.test-artifacts/exhaustive-review-ui.log`，client 专项截图为 `.test-artifacts/ui/client-review-*.png`；此前完整回归 `.test-artifacts/python-fixed-review/` 及对应 fixed-review 日志继续保留，统计路径隔离测量在 `.test-artifacts/protection-efficiency-benchmark.json`，此前恢复专项数据在 `.test-artifacts/python-recovery-stop-final/` 与 `.test-artifacts/recovery-stop-confirmed/`，性能证据在 `.test-artifacts/performance-20261010-review/report.json`，依赖查询证据在 `.test-artifacts/dependencies.json`。此前归档信息及历史验证均集中于 [检查历史](history.md)。
 
 ## 验证边界
 
-测试使用隔离数据与模拟上游，未写正式配置或执行真实云端测试操作。真实公网、手机网络及实际攻击流量未作为本次测试来源；不能用测试通过保证公网没有漏洞。源码保持 `1.1.0-dev`；本轮经用户明确授权同步 GitHub dev，具体提交以 Git 记录为准，不创建 Release。
+测试使用隔离数据与模拟上游，未写正式配置或执行真实云端测试操作。真实公网、手机网络及实际攻击流量未作为本次测试来源；不能用测试通过保证公网没有漏洞。源码保持 `1.1.0-dev`；本轮修复已本地验证，用户现已授权提交与推送 dev；不创建 Release。
+
+## 持续排查 skill
+
+个人 skill `website-troubleshooting` 已创建，串联 `website-visual-review` 与 `website-backend-review`，要求按复现证据修复、回归并维护覆盖记录。已手动核对名称、元信息长度、提示词和引用存在性；官方 quick_validate 因本地缺少 PyYAML 未运行成功。该流程不自动创建定时任务或执行发布。
+
+
+## 本轮覆盖清单（2026-10-11）
+
+- 报错/编码：client 空根对象和无效 JSON 恢复沿用已修复回归；源码 UTF-8 与替换字符扫描无异常。保留既有测试客户端弃用提示，未为消除提示升级依赖。
+- 安全边界：完整回归覆盖本机/公网/临时账户、Origin/CSRF、令牌撤销、路径与响应输出、原子写入及异步代次；静态目录新增/变更仍限本机完整管理员。
+- DDoS 资源防护：审查网关入口速率、来源额度、并发、请求体、超时、WebSocket 队列/消息、日志/统计容量和暂停后自动阻断。静态托管新增 11 次隔离请求用例，确认第 11 次在文件读取前拒绝，页面统计仅计成功访问。未对正式网站施加攻击或负载。
+- 逻辑：补查旧网站切换为 LanBridge 目标的协议及 HTTP 可访问性，两个旧协议组合通过，无需修改业务代码。
+- 视觉：37 组完整隔离浏览器检查通过，查看手机总览及桌面策略编辑截图；沿用现有字体、颜色、间距、折叠及对齐标准，未发现本轮需重新调整的已复现场景。
+- 效率：静态路径链接检查复用一次 lstat 的类型信息；普通路径元数据读取从 2 次降至 1 次，链接与目录联接拒绝条件保留。不据此声称整个请求耗时减半。
+- 历史与清理：AST 导入候选扫描为空；根目录用途已核对。旧实例识别仍被调用并有兼容测试，未发现可确认无用途的源码候选，不删除正式数据或有效测试。
+- Skill：`website-troubleshooting` 补充 DDoS 与历史代码/清理专项，手动名称及引用检查通过；官方校验器仍受缺少 PyYAML 限制。

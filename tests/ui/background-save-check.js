@@ -24,7 +24,7 @@ const root=path.resolve(__dirname,'../..'),fixture=require('./fixture').state;
  state.site_publication={phase:'failed',saved:true,message:'配置已保存，发布未完成：模拟网络失败'};await page.evaluate(()=>loadState());
  assert(await page.locator('#site-publication-retry').isVisible());await page.locator('#site-publication-retry').click();await page.waitForFunction(()=>document.querySelector('#site-publication-message').textContent.includes('正在发布 DNS'));
  assert.equal(writes.length,2);assert.equal(state.sites.filter(s=>s.id==='new').length,1);
- state.site_publication={phase:'succeeded',saved:true,message:'配置已保存，后台发布已完成'};await page.evaluate(()=>loadState());assert(await page.locator('#site-publication-retry').isHidden());
+ state.site_publication={phase:'succeeded',saved:true,message:'配置已保存，后台发布已完成'};await page.evaluate(()=>loadState());assert(await page.locator('#site-publication-retry').isHidden());assert(await page.locator('#site-publication-notice').isHidden());await page.evaluate(()=>render());assert(await page.locator('#site-publication-notice').isHidden());await page.reload();await page.locator('#shell').waitFor();assert(await page.locator('#site-publication-notice').isHidden());
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.evaluate(()=>showAuth());assert(await page.locator('#site-publication-notice').isHidden());
  assert.deepEqual(errors,[]);await page.close();
 }console.log('PASS: background save feedback, failure/retry, no duplicate save, completion and logout, desktop/mobile');}finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
