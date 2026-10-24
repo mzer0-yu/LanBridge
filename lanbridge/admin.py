@@ -653,12 +653,20 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         data = await body(request)
         background = data.pop('background', False)
         retry = data.pop('retry_publication', False)
+        repair = data.pop('repair_dns_conflict', None)
+        if repair is not None:
+            if request.state.session.get('scope') == 'sites':
+                return JSONResponse({'detail': 'DNS 迁移需要完整管理员权限'}, 403)
+            if not isinstance(repair, str) or not repair or not background or not retry:
+                raise ValueError('DNS 迁移需要当前失败任务和后台重试')
         if type(background) is not bool or type(retry) is not bool:
             raise ValueError('后台保存选项格式无效')
         allow_static_target = not remote and request.state.session.get('scope') != 'sites'
         if background:
             if retry and data:
                 raise ValueError('重试发布不能同时修改网站配置')
+            if repair is not None:
+                return await asyncio.to_thread(service.site_publication.submit, None, repair_job=repair)
             return await asyncio.to_thread(service.site_publication.submit, None if retry else data, allow_static_target=allow_static_target)
         if retry:
             raise ValueError('重试发布需要后台模式')
@@ -681,9 +689,12 @@ def create_admin(service, shutdown=None, *, remote=False, restart=None):
         if site.get("target") == "lanbridge":
             return {"http_status": 200, "reachable": True, "checked_at": time.time(), "origin": site["origin"]}
         base, host, sni = await asyncio.to_thread(pinned_origin, site, service.settings())
+        probe_headers = {"Host": host}
+        if site.get("origin_host_header") == "public":
+            probe_headers = {"Host": site["hostname"], "X-Forwarded-Host": site["hostname"], "X-Forwarded-Proto": "https"}
         try:
             async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False) as client:
-                async with client.stream("GET", base + "/", headers={"Host": host}, extensions={"sni_hostname": sni}) as response:
+                async with client.stream("GET", base + "/", headers=probe_headers, extensions={"sni_hostname": sni}) as response:
                     result = {"http_status": response.status_code, "reachable": True, "checked_at": time.time()}
         except httpx.HTTPError:
             result = {"reachable": False, "checked_at": time.time()}

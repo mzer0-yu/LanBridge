@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 from .models import Settings, Site, Zone
 from .static_site import is_static_origin, validate_homepage
+from .dns_conflict import DnsBackupCapacityError, DnsConflictError, inspect_conflict, accepted_conflict, migrate_record, reconcile_migration_backups
 from .store import Store, password_hash
 
 LAN_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
@@ -316,7 +317,7 @@ class Cloudflare:
             store.audit("turnstile_updated", {"hostnames": hosts})
             return {"sitekey": existing, "hostnames": hosts, "saved": True}
 
-    def plan(self):
+    def plan(self, *, dns_takeover=None):
         self.zone()
         cfg = self.service.settings()
         if self.service.store.get("owned_tunnel") != cfg["tunnel_id"]:
@@ -357,10 +358,14 @@ class Cloudflare:
                 verified_zones.add(selected["zone_id"])
             records = self.request("GET", f'/zones/{selected["zone_id"]}/dns_records?name={site["hostname"]}')
             target = cfg["tunnel_id"] + ".cfargotunnel.com"
+            takeover = False
             if records and (len(records) != 1 or records[0].get("type") != "CNAME" or records[0].get("content", "").rstrip(".") != target or not records[0].get("proxied")):
-                raise ValueError(f'{site["hostname"]} 已有冲突 DNS，平台不会覆盖')
+                conflict = inspect_conflict(self, site, selected, records)
+                if not accepted_conflict(conflict, dns_takeover):
+                    raise DnsConflictError(conflict)
+                takeover = True
             dns.append({"hostname": site["hostname"], "zone_id": selected["zone_id"], "zone_name": selected["zone_name"], "existing": [{"id": r["id"], "type": r["type"], "content": r["content"], "proxied": r["proxied"]} for r in records],
-                        "create": not records, "target": target})
+                        "create": not records, "target": target, **({"takeover": True} if takeover else {})})
         full = {"settings": cfg, "sites": all_sites, "remote": before, "version": version, "dns": dns, "after": after}
         revision = digest(full)
         # Store snapshot locally, return only reviewable non-sensitive data.
@@ -368,11 +373,11 @@ class Cloudflare:
         return {"revision": revision, "tunnel_id": cfg["tunnel_id"], "before": before, "after": after,
                 "dns": dns, "routes_changed": before != after, "atomic": False}
 
-    def apply(self, revision):
+    def apply(self, revision, *, dns_takeover=None):
         with self.service.lock:
             if not revision:
                 raise ValueError("请先预览配置")
-            latest = self.plan()
+            latest = self.plan(dns_takeover=dns_takeover)
             if latest["revision"] != revision:
                 raise ValueError("本机或 Cloudflare 配置已经变化，请重新预览")
             cfg = self.service.settings()
@@ -388,18 +393,25 @@ class Cloudflare:
                 actual = self.request("GET", self.tunnel_path() + "/configurations")
                 if not tunnel_config_equal(actual.get("config"), latest["after"]):
                     raise RuntimeError("远端配置写后核验失败，请重新预览并检查远端")
+                verified_dns = []
                 for item in latest["dns"]:
+                    if item.get("takeover"):
+                        migrate_record(self, item, dns_takeover)
                     rows = self.request("GET", f'/zones/{item["zone_id"]}/dns_records?name={item["hostname"]}')
                     if not any(r.get("type") == "CNAME" and r.get("content", "").rstrip(".") == item["target"] and r.get("proxied") for r in rows):
                         raise RuntimeError("DNS 写后核验失败")
+                    verified_dns.append((item, rows))
+                reconcile_migration_backups(self.service, verified_dns)
                 self.service.store.set("published_hosts", [s["hostname"] for s in self.service.sites() if s["enabled"]])
                 self.service.store.set("publication_error", None)
                 self.service.store.set("previous_gateway_port", None)
                 self.service.store.audit("publish_verified", {"revision": revision, "created_dns": created})
                 return {"verified": True, "restart_required": False}
-            except Exception:
+            except Exception as exc:
                 # API timeouts may have committed writes. Avoid destructive blind rollback.
                 self.service.store.audit("publish_incomplete", {"revision": revision, "created_dns": created, "reconcile_required": True})
+                if isinstance(exc, DnsBackupCapacityError):
+                    raise
                 raise RuntimeError("发布未完成或无法核验，可能已有部分变更；请重新预览以核对并继续") from None
 
     def status(self):
@@ -525,6 +537,13 @@ class Connector:
                     self.process.wait()
                 self.service.store.audit("connector_stopped", {})
             return self.status()
+
+
+def configured_sites(sites, cfg):
+    """Normalize legacy stored defaults without opening or changing any storage."""
+    return [dict(site, human_check_mode=site.get("human_check_mode", "always"), protocols=site.get("protocols", ["http", "websocket"]),
+                 zone_id=site.get("zone_id") or (cfg["zone_id"] if hostname_in_zone(site["hostname"], cfg["zone_name"]) else ""))
+            for site in sites]
 
 
 class Service:
@@ -708,9 +727,7 @@ class Service:
 
     def sites(self, cfg=None):
         cfg = self.settings() if cfg is None else cfg
-        return [dict(site, human_check_mode=site.get("human_check_mode", "always"), protocols=site.get("protocols", ["http", "websocket"]),
-                     zone_id=site.get("zone_id") or (cfg["zone_id"] if hostname_in_zone(site["hostname"], cfg["zone_name"]) else ""))
-                for site in self.store.get("sites", [])]
+        return configured_sites(self.store.get("sites", []), cfg)
 
     def site_zone(self, site):
         zones = self.settings()["zones"]
@@ -840,6 +857,7 @@ class Service:
             body.setdefault("zone_id", "" if hostname_changed else (existing or {}).get("zone_id", ""))
             body.setdefault("human_remember_days", (existing or {}).get("human_remember_days", 1))
             body.setdefault("human_check_mode", (existing or {}).get("human_check_mode", "always"))
+            body.setdefault("origin_host_header", (existing or {}).get("origin_host_header", "origin"))
             if body["target"] == "lanbridge":
                 body["origin"] = f'http://127.0.0.1:{self.settings()["admin_port"]}'
                 body["protocols"] = ["http"]

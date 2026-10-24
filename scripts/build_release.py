@@ -8,8 +8,8 @@ import subprocess
 import zipfile
 
 ROOT_FILES = {'AGENTS.md', 'README.md', 'SECURITY.md', 'COPYRIGHT.md', 'LICENSE',
-              'VERSION', '.gitignore', 'config.example.json', 'install.ps1',
-              'start.cmd', 'start.ps1', 'run.py', 'mcp_server.py',
+              'VERSION', '.gitignore', 'config.example.json', 'install.ps1', 'install-cli.ps1',
+              'start.cmd', 'start.ps1', 'lanbridge.cmd', 'run.py', 'mcp_server.py',
               'requirements.txt', 'requirements.lock.txt'}
 EXTENSIONS = {'lanbridge': {'.py'}, 'tests': {'.py', '.js', '.cjs', '.ps1', '.md'},
               'scripts': {'.py', '.ps1'}, 'skills': {'.md'},

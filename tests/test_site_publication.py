@@ -113,3 +113,32 @@ def test_stopping_during_verification_does_not_start_publication(service, monkey
     assert calls == (["widget"] if stage == "widget" else ["widget", "plan"])
     assert job["phase"] == "failed" and job["saved"]
     assert service.sites()[0]["hostname"] == 'app.example.com'
+
+
+@pytest.mark.parametrize('drift', ['dns', 'route', 'none'])
+def test_retry_after_interrupted_job_rechecks_cloud_even_when_hosts_match(service, monkeypatch, drift):
+    from test_cloudflare import prepare
+    remote, records, calls, site = prepare(service, monkeypatch)
+    service.cf.apply(service.cf.plan()['revision'])
+    assert service.store.get('publication_error') is None
+    if drift == 'dns':
+        records[0]['content'] = 'unrelated.example.net'
+    elif drift == 'route':
+        remote['config']['ingress'][1]['service'] = 'http://127.0.0.1:9999'
+    service.store.set('site_publication_job', {'id': 'interrupted', 'phase': 'publishing', 'saved': True})
+    service.site_publication.recover()
+    calls.clear()
+    service.site_publication.submit()
+    job = wait(service)
+    assert job['phase'] == ('succeeded' if drift == 'none' else 'failed'), 'Unknown remote result must be checked before reporting success'
+    assert calls and all(method == 'GET' for method, _, _ in calls)
+
+
+def test_cosmetic_save_does_not_republish_unchanged_hosts(service, monkeypatch):
+    from test_cloudflare import prepare
+    remote, records, calls, site = prepare(service, monkeypatch)
+    service.cf.apply(service.cf.plan()['revision'])
+    calls.clear()
+    service.site_publication.submit(site | {'name': 'Renamed'})
+    assert wait(service)['phase'] == 'succeeded'
+    assert calls == []

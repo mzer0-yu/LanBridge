@@ -13,6 +13,7 @@ class Site(BaseModel):
     hostname: str
     zone_id: str = ""
     origin: str
+    origin_host_header: Literal["origin", "public"] = "origin"
     target: Literal["website", "lanbridge"] = "website"
     enabled: bool = True
     paused: bool = False
@@ -61,6 +62,8 @@ class Site(BaseModel):
 
     @model_validator(mode="after")
     def static_protocols(self):
+        if self.target == "lanbridge" or is_static_origin(self.origin):
+            self.origin_host_header = "origin"
         if is_static_origin(self.origin):
             if self.target != "website":
                 raise ValueError("静态主页不能作为 LanBridge 管理入口")

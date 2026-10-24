@@ -9,6 +9,7 @@ import sys
 import threading
 
 from lanbridge.service import Service
+from lanbridge.cli_parser import SafeArgumentParser
 from lanbridge.models import Settings
 from lanbridge.store import password_hash
 
@@ -211,10 +212,22 @@ def open_existing(root, open_browser=True):
         return False
 
 
-def main():
-    parser = argparse.ArgumentParser(description="LanBridge 管理平台 · CLI / API / MCP / SKILL")
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Normalize the legacy global option before forwarding online options intact.
+    if len(argv) >= 3 and argv[0] == '--data-dir' and argv[2] == 'online':
+        argv = ['online', '--data-dir', argv[1], *argv[3:]]
+    elif len(argv) >= 2 and argv[0].startswith('--data-dir=') and argv[1] == 'online':
+        argv = ['online', argv[0], *argv[2:]]
+    # Online commands do not instantiate Service or touch the runtime database.
+    if argv and argv[0] == 'online':
+        from lanbridge.cli import main as online_main
+        return online_main(argv[1:])
+    parser = SafeArgumentParser(prog='lanbridge', description="LanBridge 管理平台 · CLI / API / MCP / SKILL")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     sub = parser.add_subparsers(dest="command", required=True)
+    online = sub.add_parser("online", help="运行中管理：login、sites、pause、connector、api；online --help 查看全部命令")
+    online.add_argument("online_args", nargs=argparse.REMAINDER)
     sub.add_parser("capabilities")
     server = sub.add_parser("serve", help="启动本机管理服务；默认前台运行、不打开浏览器")
     server.add_argument("--hot-reload", action=argparse.BooleanOptionalAction, default=True, help="检测源码变化并受控自动重载；默认启用")
@@ -257,7 +270,10 @@ def main():
     apply.add_argument("--revision", required=True)
     sub.add_parser("check")
     sub.add_parser("ensure-connector")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.command == "online":
+        from lanbridge.cli import main as online_main
+        return online_main(["--data-dir", str(args.data_dir), *args.online_args])
     if args.command == "capabilities":
         print(json.dumps({"schema": "lanbridge-capabilities/v1", "commands": list(sub.choices), "interfaces": ["cli", "api", "mcp", "skill"], "shared_business_core": True, "admin_loopback_only": True, "preview_required": True, "secrets_in_arguments": False}, ensure_ascii=False, indent=2))
         return 0
@@ -284,9 +300,16 @@ def main():
         print("LanBridge 已运行，继续使用现有管理台。")
         return 0
     try:
-        service = Service(args.data_dir.resolve())
-        lock = acquire_runtime(service.store.root) if args.command != "status" else None
+        if args.command == "status":
+            from lanbridge.cli_status import read_status
+            result = read_status(args.data_dir.resolve())
+            print(json.dumps({"schema": "lanbridge-result/v1", "ok": True, "result": result}, ensure_ascii=False, indent=2))
+            return 0
+        data_root = args.data_dir.resolve()
+        data_root.mkdir(parents=True, exist_ok=True)
+        lock = acquire_runtime(data_root)
         try:
+            service = Service(data_root)
             if args.command == "serve":
                 serve(service, args.open_browser, args.authorize_cloudflare, args.admin_port, args.gateway_port, args.startup_result, fallback_admin_port=args.fallback_admin_port, resume_connector=args.resume_connector, hot_reload=args.hot_reload)
                 plan = getattr(service, "restart_plan", None)
@@ -355,8 +378,6 @@ def main():
                 if data.get("passcode_required"):
                     data["passcode"] = getpass.getpass("网站访问口令（新建至少 12 位，编辑留空保留）：")
                 result = service.save_site(data, synchronize_verification=True)
-            elif args.command == "status":
-                result = {"settings": service.settings(), "pending_admin_port": service.store.get("pending_admin_port"), "pending_gateway_port": service.store.get("pending_gateway_port"), "sites": service.sites(), "cloudflare": service.store.get("cloudflare_status"), "note": "连接器实时进程状态请查管理台 API"}
             elif args.command == "create-tunnel":
                 result = service.cf.create_tunnel()
             elif args.command == "provision-token":

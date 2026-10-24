@@ -1,4 +1,4 @@
-﻿param([string]$PythonPath = 'python')
+﻿param([string]$PythonPath = 'python', [switch]$AddToPath)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if (-not (Test-Path -LiteralPath '.venv/Scripts/python.exe')) {
@@ -8,3 +8,5 @@ if (-not (Test-Path -LiteralPath '.venv/Scripts/python.exe')) {
 & ./.venv/Scripts/python.exe -m pip install -r requirements.lock.txt
 if ($LASTEXITCODE -ne 0) { throw '依赖安装失败' }
 Write-Host '安装完成，双击 start.cmd 启动 LanBridge；管理端口和是否打开管理台可在启动器选择。'
+
+& (Join-Path $PSScriptRoot 'install-cli.ps1') -AddToPath:$AddToPath

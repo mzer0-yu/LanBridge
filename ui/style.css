@@ -771,7 +771,8 @@ button.primary.destructive{background:#b44336;border-color:#b44336;color:#fff}
 
 #site-publication-notice{display:grid;gap:10px}
 #site-publication-message{overflow-wrap:anywhere}
-#site-publication-notice>.button-row:has(button[hidden]){display:none}
+#site-publication-notice>.button-row:not(:has(button:not([hidden]))){display:none}
+#site-publication-detail{margin:0;line-height:20px;overflow-wrap:anywhere}
 
 #account-config-details .account-authorization-heading{margin:0 0 12px;font-size:14px}
 #account-config-details #tunnel-maintenance{margin:12px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}

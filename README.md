@@ -27,6 +27,20 @@ LanBridge 是面向 Windows 的自托管 Cloudflare Tunnel 管理工具。把 NA
 | 操作记录 | 按容量保留管理操作记录，默认上限 10 MB，支持 JSONL 导出和日志 URL |
 | 自动化入口 | CLI、HTTP API、MCP 与 Agent 操作说明共用业务核心 |
 
+## 命令行工具
+
+项目提供 `lanbridge.cmd` 与 `python -m lanbridge`。运行 `install-cli.ps1 -AddToPath` 后，新终端可以直接输入 `lanbridge`。运行中管理：
+
+```powershell
+lanbridge online login
+lanbridge online sites
+lanbridge online pause SITE_ID --field cloudflare=true
+lanbridge online resume SITE_ID
+lanbridge online commands
+```
+
+网站、访问防护、Cloudflare 授权、域名接入、日志、连接器和实例管理均有具名命令；使用 `online --help` 或 [完整命令对应表](docs/cli-commands.md) 逐项查看，无需手写 API 路径。登录会话使用 Windows DPAPI 加密保存，现有权限与发布核验不变。完整说明见 [命令行指南](docs/cli.md)。
+
 ## 适合哪些场景
 
 - **家庭与个人工具**：在外访问自己维护的 NAS 网页、家庭仪表盘或个人 Web 服务。

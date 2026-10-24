@@ -825,7 +825,7 @@ def create_gateway(service):
         target = base + raw_path + ("?" + query if query else "")
         headers = [(k, v) for k, v in filtered_headers(request.headers) if k.lower() not in {"host", "content-length", "cookie", "forwarded"} and not k.lower().startswith(("x-forwarded-", "cf-"))]
         cookies = "; ".join(part.strip() for part in request.headers.get("cookie", "").split(";") if part.strip() and part.strip().split("=", 1)[0] not in {PASS_COOKIE, HUMAN_COOKIE, "lb_admin"})
-        headers += [("host", host), ("x-forwarded-host", site["hostname"]), ("x-forwarded-proto", "https"), ("x-forwarded-for", request.state.ip)]
+        headers += [("host", site["hostname"] if site.get("origin_host_header") == "public" else host), ("x-forwarded-host", site["hostname"]), ("x-forwarded-proto", "https"), ("x-forwarded-for", request.state.ip)]
         if cookies:
             headers.append(("cookie", cookies))
         # Keep known body lengths; do not manufacture chunked uploads for bodyless requests.
@@ -1016,7 +1016,7 @@ def create_gateway(service):
             sock.setblocking(False)
             raw_path = ws.scope.get("raw_path", ws.url.path.encode()).decode("ascii")
             query = ws.scope.get("query_string", b"").decode("ascii")
-            uri = ("wss://" if u.scheme == "https" else "ws://") + host + raw_path + ("?" + query if query else "")
+            uri = ("wss://" if u.scheme == "https" else "ws://") + (site["hostname"] if site.get("origin_host_header") == "public" else host) + raw_path + ("?" + query if query else "")
             cookies = "; ".join(p.strip() for p in ws.headers.get("cookie", "").split(";") if p.strip() and p.strip().split("=", 1)[0] not in {PASS_COOKIE, HUMAN_COOKIE, "lb_admin"})
             headers = {k: v for k, v in filtered_headers(ws.headers) if k.lower() not in {"host", "cookie", "origin", "forwarded"} and not k.lower().startswith(("sec-websocket-", "x-forwarded-", "cf-"))}
             headers.update({"X-Forwarded-Host": site["hostname"], "X-Forwarded-Proto": "https", "X-Forwarded-For": ip})

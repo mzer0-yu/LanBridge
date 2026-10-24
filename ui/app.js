@@ -646,6 +646,8 @@ function updateSiteControls(){
     $('#site-origin-field').hidden=own;$('#site-origin-hint').hidden=own;$('#site-lanbridge-hint').hidden=!own;
     form.elements.origin.required=!own;form.elements.origin.disabled=own;
     $('#site-protocol-options').hidden=own||localStatic;
+    $('#site-origin-options').hidden=own||localStatic;
+    form.elements.origin_host_header.disabled=own||localStatic;
     if(own||localStatic){form.elements.protocol_http.checked=true;form.elements.protocol_websocket.checked=false;}
   }
   $('#site-passcode-field').hidden=!form.elements.passcode_required.checked;
@@ -653,7 +655,7 @@ function updateSiteControls(){
   $('#policy-save-hint').hidden=!form.elements.id.value||!(form.elements.human_check.checked||form.elements.passcode_required.checked);
 }
 function selectedProtocols(form){return ['http','websocket'].filter(key=>form.elements['protocol_'+key].checked);}
-function editSite(id){if(!state)return;if(!id&&!state.cloudflare_setup?.ready){locateSetup();toast(setupMessage(),true);return;}const site=state.sites.find(s=>s.id===id);const form=$('#site-form');form.reset();delete form.dataset.staticProtocols;form.elements.zone_id.innerHTML=configuredZones(state).map(z=>`<option value="${esc(z.zone_id)}">${esc(z.zone_name)}</option>`).join('');form.elements.id.value='';form.elements.hostname.readOnly=false;$('#site-error').textContent='';$('#site-dialog-title').textContent=site?'编辑网站与策略':'添加网站';$('#policy-save-hint').hidden=!site;if(site){for(const el of form.elements){if(!el.name||el.name==='passcode'||el.name.startsWith('protocol_'))continue;const v=site[el.name]??(el.name==='human_remember_days'?1:el.name==='human_check_mode'?'always':undefined);if(el.type==='checkbox')el.checked=!!v;else el.value=Array.isArray(v)?v.join(', '):v??'';}}form.elements.zone_id.value=site?.zone_id||configuredZones(state).filter(z=>site&&(site.hostname===z.zone_name||site.hostname.endsWith('.'+z.zone_name))).sort((a,b)=>b.zone_name.length-a.zone_name.length)[0]?.zone_id||state.settings.zone_id;form.elements.zone_id.disabled=false;form.elements.hostname.placeholder='app.'+(configuredZones(state).find(z=>z.zone_id===form.elements.zone_id.value)?.zone_name||'example.com');form.elements.target.value=site?.target||'website';$('#site-forward-lanbridge').checked=form.elements.target.value==='lanbridge';const protocols=site?.protocols||['http','websocket'];for(const key of ['http','websocket'])form.elements['protocol_'+key].checked=protocols.includes(key);updateSiteControls();sitePauseEditorSession=csrf;$('#site-pause-error-details').open=false;$('#site-pause-cloud').checked=!!state.site_pause?.[site?.id]?.desired;renderSitePauseEditor();$('#site-dialog').showModal();$('.site-dialog-body').scrollTop=0;}
+function editSite(id){if(!state)return;if(!id&&!state.cloudflare_setup?.ready){locateSetup();toast(setupMessage(),true);return;}const site=state.sites.find(s=>s.id===id);const form=$('#site-form');form.reset();delete form.dataset.staticProtocols;form.elements.zone_id.innerHTML=configuredZones(state).map(z=>`<option value="${esc(z.zone_id)}">${esc(z.zone_name)}</option>`).join('');form.elements.id.value='';form.elements.hostname.readOnly=false;$('#site-error').textContent='';$('#site-dialog-title').textContent=site?'编辑网站与策略':'添加网站';$('#policy-save-hint').hidden=!site;if(site){for(const el of form.elements){if(!el.name||el.name==='passcode'||el.name.startsWith('protocol_'))continue;const v=site[el.name]??(el.name==='human_remember_days'?1:el.name==='human_check_mode'?'always':undefined);if(el.type==='checkbox')el.checked=!!v;else el.value=Array.isArray(v)?v.join(', '):v??'';}}form.elements.zone_id.value=site?.zone_id||configuredZones(state).filter(z=>site&&(site.hostname===z.zone_name||site.hostname.endsWith('.'+z.zone_name))).sort((a,b)=>b.zone_name.length-a.zone_name.length)[0]?.zone_id||state.settings.zone_id;form.elements.zone_id.disabled=false;form.elements.hostname.placeholder='app.'+(configuredZones(state).find(z=>z.zone_id===form.elements.zone_id.value)?.zone_name||'example.com');form.elements.origin_host_header.value=site?.origin_host_header||'origin';$('#site-origin-options').open=false;form.elements.target.value=site?.target||'website';$('#site-forward-lanbridge').checked=form.elements.target.value==='lanbridge';const protocols=site?.protocols||['http','websocket'];for(const key of ['http','websocket'])form.elements['protocol_'+key].checked=protocols.includes(key);updateSiteControls();sitePauseEditorSession=csrf;$('#site-pause-error-details').open=false;$('#site-pause-cloud').checked=!!state.site_pause?.[site?.id]?.desired;renderSitePauseEditor();$('#site-dialog').showModal();$('.site-dialog-body').scrollTop=0;}
 let pauseDialogSite=null;
 function requestSitePause(id){
  const site=state?.sites.find(s=>s.id===id);if(!site)return;
@@ -1269,17 +1271,32 @@ function navigationIssues(current){
 let sitePublicationPoll=null;
 function renderSitePublication(){
   const job=state?.site_publication,active=job&&['queued','verification','publishing'].includes(job.phase);
+  const busy=['site-publication-retry','site-publication-repair'].some(id=>!!$('#'+id).dataset.busy);
   $('#site-publication-notice').hidden=!active&&job?.phase!=='failed';
   $('#site-publication-message').textContent=job?.message||'';
   $('#site-publication-retry').hidden=job?.phase!=='failed';
-  $('#site-publication-retry').disabled=!!active;
+  $('#site-publication-retry').disabled=!!active||busy;
+  const conflict=job?.phase==='failed'?job.dns_conflict:null;
+  $('#site-publication-detail').textContent=conflict?.detail||'';
+  $('#site-publication-detail').hidden=!conflict?.detail;
+  $('#site-publication-repair').hidden=!conflict?.repairable||state?.access_scope==='sites';
+  $('#site-publication-repair').disabled=!!active||busy;
   if(active&&!sitePublicationPoll)sitePublicationPoll=setInterval(pollState,2000);
   if(!active&&sitePublicationPoll){clearInterval(sitePublicationPoll);sitePublicationPoll=null;}
 }
-$('#site-publication-retry').onclick=async e=>{
-  const session=csrf;
-  try{await action(e.currentTarget,'sites',null,{background:true,retry_publication:true},{inlineError:true});}
+async function submitSitePublication(button,data){
+  if(['site-publication-retry','site-publication-repair'].some(id=>!!$('#'+id).dataset.busy))return;
+  const session=csrf,pending=action(button,'sites',null,data,{inlineError:true});
+  renderSitePublication();
+  try{await pending;}
   catch(error){if(session===csrf&&state)$('#site-publication-message').textContent=error.message;}
+  finally{if(session===csrf&&state)renderSitePublication();}
+}
+$('#site-publication-retry').onclick=e=>submitSitePublication(e.currentTarget,{background:true,retry_publication:true});
+$('#site-publication-repair').onclick=e=>{
+  const job=state?.site_publication;
+  if(!job?.dns_conflict?.repairable)return;
+  return submitSitePublication(e.currentTarget,{background:true,retry_publication:true,repair_dns_conflict:job.id});
 };
 function renderNavigationIssues(){
   renderSitePublication();

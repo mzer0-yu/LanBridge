@@ -55,3 +55,7 @@
 静态托管：`static-hosting-check.js` 检查主页文件 URL 识别、协议恢复、保存/重开和 320/390/1440px 布局。
 
 Client 品牌与刷新：`client-refresh-layout-check.js` 检查说明实际间距和对比度、断点两侧、焦点保留、异常响应恢复及空/暂停/静态状态。
+
+`dns-migration-check.js`：检查旧隧道冲突说明、文本转义、一键迁移任务参数、等待/普通冲突/临时权限/成功状态及 320/390/1440px 排版。仅模拟 API，不迁移正式域名。
+
+`origin-host-check.js`：检查源站 Host 默认值、保存重开、静态/LanBridge 隐藏状态及 320/390/1440px 折叠选项布局。使用虚构网站及模拟 API，不修改正式配置。
